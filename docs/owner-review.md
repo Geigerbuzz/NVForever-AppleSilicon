@@ -617,14 +617,11 @@ the spec it links to.
     good, and House's Securitrons with them. A save holding such an enemy loses it on
     load. If you rule otherwise: name the factions by hand, or stop making the player a
     faction's enemy on murder at all (observer check 184 asks what the original does).
-    **Needs your ruling against #2506 (crime expiry, merged):** Karl at Red Rock
-    (VRRCKarl 0x00140E60) is in ArmorVCaesarsLegionFaction and two other factions, not
-    VCaesarsLegionFaction [observed: `fnvtool esm decode`], so he turns on the player for a
-    Legionary's murder at Cottonwood Cove only by the armour faction's flag. With this
-    rule he no longer does, and smoke `crime-expiry-karl-hostile` / `-calm` (which expect
-    that flag) fail. Either this rule stands and those scenarios move to a victim whose
-    faction is a side, or the Legion's armour faction stays a side and the Strip troopers
-    are fixed another way (for example by their scene alone).
+    **Ruled 2026-11-15 (owner, on #2498): the rule stands.** Karl at Red Rock (VRRCKarl
+    0x00140E60) is in ArmorVCaesarsLegionFaction and two other factions, not
+    VCaesarsLegionFaction [observed: `fnvtool esm decode`], so a Legionary's murder at
+    Cottonwood Cove no longer turns him on the player; #2506's Karl scenarios now check
+    that (smoke `crime-karl-no-side`, `crime-expiry-legion-calm`).
     ([crime-karma §3.4](spec-notes/crime-karma.md))
 
 ## Not a gameplay decision: what the extender work needs from you (2026-10-25)

@@ -6525,9 +6525,9 @@ expect = [
 ]
 
 [[scenario]]
-name = "crime-expiry-karl-hostile"
-source = "issue #2467 (owner's playtest 2026-11-14): Karl, the Legion's envoy at Red Rock, attacked on sight. He is in ArmorVCaesarsLegionFaction (Track Crime), and a seen murder of a Legionary in no Evil faction makes the player an enemy of the victim's crime-tracking factions, that one among them (docs/spec-notes/crime-karma.md §3.4, §3.7). Within iCoolDownTimerSetting (3) days of the murder he fights: the crime path that sets the flag, staged here"
-note = "at Cottonwood Cove (--day 30, hour 12) the face aid puts the player at NVCCLegionary5REF's post (0x001364BC, which its OnLoad script SCPT 0x00174CE8 disables) at 14 s, in sight of NVCCAurelius (0x0012D6E2), who detects the player; the script aid kills NVCCLegionary4REF (0x001364C0, in no Evil faction, karma 0) as the player at 18 s (Game::kill): a murder the witness saw. coc to Karl's longhouse at 22 s; the face aid puts the player in front of Karl (0x00140E71) at 30 s. Karl never saw the murder: he fights by the faction flag alone. A Legionary in an Evil faction (NVLegionaryAlexusREF, CaesarsLegionTechMineFaction) is no victim for this: the Evil faction's area alert flags that faction only, and the kill then counts as self-defence. crime-expiry-karl-calm is the same with the clock moved on four days first"
+name = "crime-karl-no-side"
+source = "issue #2467 (owner's playtest 2026-11-14): Karl, the Legion's envoy at Red Rock, attacked on sight. He is in ArmorVCaesarsLegionFaction (Track Crime) and not in VCaesarsLegionFaction [observed: fnvtool esm decode VRRCKarl 0x00140E60]. The armour faction is no side (its members' records name factions that are enemies of each other), and a murder makes the player an enemy of no faction that is no side (#2456; owner's ruling 2026-11-15 on #2498, docs/owner-review.md item 65; docs/spec-notes/crime-karma.md §3.4): a seen murder of a Cottonwood Cove Legionary flags the Legion's own faction, and Karl, who never saw it, stays calm"
+note = "at Cottonwood Cove (--day 30, hour 12) the face aid puts the player at NVCCLegionary5REF's post (0x001364BC, which its OnLoad script SCPT 0x00174CE8 disables) at 14 s, in sight of NVCCAurelius (0x0012D6E2), who detects the player; the script aid kills NVCCLegionary4REF (0x001364C0, in no Evil faction, karma 0) as the player at 18 s (Game::kill): a murder the witness saw. coc to Karl's longhouse at 22 s; the face aid puts the player in front of Karl (0x00140E71) at 30 s, where he detects the player. Before #2498 this scenario was crime-expiry-karl-hostile and expected Karl to fight by the armour faction's flag. crime-expiry-legion-calm is the same with the clock moved on four days first"
 areas = ["crime"]
 paths = ["crates/fnv-game/src/crime.rs", "crates/fnv-game/src/detection.rs", "crates/fnv-game/src/rest.rs", "crates/fnv-game/src/functions/actor.rs", "engine/nvf-play/src/crime.rs", "engine/nvforever/src/npc_combat.rs"]
 env = { NVF_PLAY_TEST_GOD = "1", NVF_PLAY_TEST_SCRIPT_MENUS = "0.05", NVF_PLAY_TEST_FACE = "14:001364BC,30:00140E71", NVF_PLAY_TEST_SCRIPT = "18:kill:0x001364C0", NVF_PLAY_TEST_CONSOLE = "22:coc 4BRRCPapasCabin;22.3:close" }
@@ -6535,22 +6535,24 @@ args = ["--world", "WastelandNV", "--pos=63363,-89150,-1500", "--play", "--hour"
 run_seconds = 44
 order = [[
   { re = 'detection: NVCCAurelius 0012D6E2 → the player: \w+ → detected', label = "a witness (Aurelius, who sees the murder) detects the player before the kill" },
-  { re = 'crime: the player is now an enemy of ArmorVCaesarsLegionFaction$', label = "the flag lands on the armour faction, Karl's (faction lines name the Editor ID)" },
-  { re = 'alert: VRRCKarl 00140E71 \w+ → Combat', label = "Karl fights in the longhouse, by the flag alone" },
+  { re = 'crime: the player is now an enemy of VCaesarsLegionFaction$', label = "the flag lands on the Legion's own faction, a side (faction lines name the Editor ID)" },
+  { re = 'detection: VRRCKarl 00140E71 → the player: \w+ → detected', label = "Karl at Red Rock detects the player" },
 ]]
 expect = [
   { re = 'test aid: the player killed 0x001364C0', label = "the player kills NVCCLegionary4REF (Game::kill)" },
-  { re = 'crime: murder against .*turned on the player: \[\S', label = "a murder the witness saw: it turns" },
+  { re = 'crime: murder against NVCCLegionary4REF 0x001364C0; seen by \[', label = "a murder the witness saw" },
 ]
 forbid = [
+  { re = 'crime: the player is now an enemy of ArmorVCaesarsLegionFaction', label = "no flag on the armour faction, which is no side" },
+  { re = 'alert: VRRCKarl 00140E71 \w+ → (Alert|Combat)', label = "Karl does not fight or search for the player at Red Rock" },
   { re = 'crime: the player is no longer an enemy of ', label = "no crime expires within the run" },
   { re = 'provocation: the player attacked .*\(Evil\)', label = "the victim is in no Evil faction" },
 ]
 
 [[scenario]]
-name = "crime-expiry-karl-calm"
-source = "issue #2467: the crime-expiry-karl-hostile set-up, and the clock moved on four game days after the murder (a script setting GameDaysPassed, as the console's `set` does): the crime is older than iCoolDownTimerSetting (3 days), the flag a crime set is cleared, and Karl at Red Rock does not fight (docs/spec-notes/crime-karma.md §3.7) [documented: GECK wiki Category:Crime]"
-note = "as crime-expiry-karl-hostile, with `set GameDaysPassed to 34.5` at 20 s (the murder at about day 30.0); expiry is read at the next detection round's start"
+name = "crime-expiry-legion-calm"
+source = "issue #2467: the crime-karl-no-side set-up, and the clock moved on four game days after the murder (a script setting GameDaysPassed, as the console's `set` does): the crime is older than iCoolDownTimerSetting (3 days), the flag the murder set on the Legion's own faction is cleared, the witnesses forgive, and Karl at Red Rock does not fight (docs/spec-notes/crime-karma.md §3.7) [documented: GECK wiki Category:Crime]. Before #2498 this was crime-expiry-karl-calm and cleared the armour faction's flag, which a murder no longer sets"
+note = "as crime-karl-no-side, with `set GameDaysPassed to 34.5` at 20 s (the murder at about day 30.0); expiry is read at the next detection round's start"
 areas = ["crime"]
 paths = ["crates/fnv-game/src/crime.rs", "crates/fnv-game/src/detection.rs", "crates/fnv-game/src/rest.rs", "crates/fnv-game/src/functions/actor.rs", "engine/nvf-play/src/crime.rs", "engine/nvforever/src/npc_combat.rs"]
 env = { NVF_PLAY_TEST_GOD = "1", NVF_PLAY_TEST_SCRIPT_MENUS = "0.05", NVF_PLAY_TEST_FACE = "14:001364BC,30:00140E71", NVF_PLAY_TEST_SCRIPT = "18:kill:0x001364C0", NVF_PLAY_TEST_CONSOLE = "20:set GameDaysPassed to 34.5;20.3:close;22:coc 4BRRCPapasCabin;22.3:close" }
@@ -6558,14 +6560,17 @@ args = ["--world", "WastelandNV", "--pos=63363,-89150,-1500", "--play", "--hour"
 run_seconds = 44
 order = [[
   { re = 'detection: NVCCAurelius 0012D6E2 → the player: \w+ → detected', label = "a witness (Aurelius, who sees the murder) detects the player before the kill" },
-  { re = 'crime: the player is now an enemy of ArmorVCaesarsLegionFaction$', label = "the murder sets the armour faction's flag (faction lines name the Editor ID)" },
-  { re = 'crime: the player is no longer an enemy of ArmorVCaesarsLegionFaction: the last crime against it is 4\.\d\d game days old', label = "four days on, the crime's flag is cleared" },
+  { re = 'crime: the player is now an enemy of VCaesarsLegionFaction$', label = "the murder sets the Legion's own faction's flag (faction lines name the Editor ID)" },
+  { re = 'crime: the player is no longer an enemy of VCaesarsLegionFaction: the last crime against it is 4\.\d\d game days old', label = "four days on, the crime's flag is cleared" },
 ]]
 expect = [
   { re = 'test aid: the player killed 0x001364C0', label = "the player kills NVCCLegionary4REF (Game::kill)" },
   { re = "crime: .* no longer counts the player's crimes: the last is 4\\.\\d\\d game days old", label = "the witness forgives too" },
 ]
-forbid = [{ re = 'alert: VRRCKarl 00140E71 \w+ → (Alert|Combat)', label = "Karl does not fight or search for the player at Red Rock" }]
+forbid = [
+  { re = 'alert: VRRCKarl 00140E71 \w+ → (Alert|Combat)', label = "Karl stays calm at Red Rock, before and after the expiry" },
+  { re = 'crime: the player is now an enemy of ArmorVCaesarsLegionFaction', label = "the murder sets no flag on the armour faction (no side)" },
+]
 
 [[scenario]]
 name = "karma-fiend"

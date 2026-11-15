@@ -390,10 +390,12 @@ GetOwnerOfCell, HasOwnership, SetIsPCAMurderer, ClearActorsFactionsPlayerEnemyFl
   warnings, RewardKarma; crimes expiring, §3.7: after three days of waiting, a script's
   clock jump, the Wait menu's check, a script's flag kept, a later crime restarting the
   count, an older save dated at the load).
-- Smoke scenarios `crime-expiry-karl-hostile` and `crime-expiry-karl-calm` (§3.7, #2467):
-  a Cottonwood Cove Legionary in no Evil faction murdered while another, at its post,
-  detects the player, then the longhouse at Red Rock; Karl fights at once, and after a
-  clock jump of four days he does not.
+- Smoke scenarios `crime-karl-no-side` and `crime-expiry-legion-calm` (§3.4, §3.7, #2467,
+  #2456): a Cottonwood Cove Legionary in no Evil faction murdered while another, at its
+  post, detects the player, then the longhouse at Red Rock. The murder flags
+  VCaesarsLegionFaction, never the armour faction (no side), so Karl, who is only in the
+  armour faction, does not fight; after a clock jump of four days the Legion's flag is
+  cleared and the witnesses forgive.
 - In play, smoke scenarios `crime-steal` (a carton of cigarettes taken in front of Chet in
   his store: "crime: theft against GSChet … turned on the player: [GSChetRef …]", the
   karma line and his fight) and `karma-fiend` (Violet shot dead: "crime: karma +100 for
