@@ -2335,6 +2335,7 @@ impl GameData {
         d.source_units.extend(crate::source_compile::apply(&mut units, recompiled, &mut d.issues));
         d.units = units;
         clock.lap("source compile results put in");
+        crate::fixes::apply(&mut d);
         for stages in d.need_stages.values_mut() {
             stages.sort_by_key(|s| (s.threshold, s.stage));
         }

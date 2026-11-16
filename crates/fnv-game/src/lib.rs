@@ -85,6 +85,7 @@ pub mod difficulty;
 pub mod experience;
 pub mod ext_probes;
 pub mod ext_save;
+pub mod fixes;
 pub mod functions;
 pub mod hacking;
 pub mod holotapes;
