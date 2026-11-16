@@ -1029,15 +1029,17 @@ pub(crate) fn dlss_pass(
 /// pinned one. Without a pin it is `RenderPlugin::default()`. `main` sets it on
 /// `DefaultPlugins`, after [`DlssInitPlugin`] has run.
 ///
-/// On Apple the device is also asked for without `TEXTURE_BINDING_ARRAY` and
-/// `BUFFER_BINDING_ARRAY`: wgpu refuses a bind group holding both a binding array and a
-/// uniform buffer (wgpu-core `validate_binding_arrays`), and a material extension's own
-/// uniform shares the material's group with `StandardMaterial`'s bindless arrays — which is
-/// exactly `NifSurface` (nvf-assets `nif_material.rs`, "Bindless"). Without the features
-/// Bevy binds the plain way throughout: that extension's uniform at binding 50 and its
-/// textures at 51 to 53, the path those shaders already have. `disabled_features` is the
-/// switch that works: Bevy's default `WgpuSettingsPriority::Functionality` enables every
-/// feature the adapter has, and `features` is only OR-ed in on top.
+/// On Apple nothing is disabled: bindless texture arrays stay on. They were briefly turned
+/// off here because wgpu refuses a bind group holding both a binding array and a uniform
+/// buffer (wgpu-core `validate_binding_arrays`), and `NifSurface`'s own uniform shares the
+/// material's group with `StandardMaterial`'s arrays. The real cause was the AsBindGroup
+/// budget test (textures x slots against Metal's 1024
+/// `max_binding_array_sampler_elements_per_shader_stage`), which made `NifSurface` (3x512)
+/// and `TerrainLayers` (13x512) fall back to non-bindless while the base material stayed
+/// bindless. Both now ask for 64 slots on Apple (nvf-assets `nif_material.rs`, nvforever
+/// `terrain.rs`), which fits, and bindless measures **2.1x faster** in the CPU-bound scenes
+/// (Novac 11.7 -> 5.5 ms, 84 -> 182 fps) with a bit-identical picture. Do not disable it
+/// again to "fix" a layout error: fix the slot budget instead.
 pub fn render_plugin() -> bevy::render::RenderPlugin {
     let adapter_name = adapter_pin();
     if adapter_name.is_none() {
