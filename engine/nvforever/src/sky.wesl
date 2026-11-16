@@ -115,7 +115,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // rather than ending as a line.
         let dir = normalize(in.world_position.xyz - view.world_position.xyz);
         let low = 1.0 - smoothstep(0.02, 0.30, dir.y);
-        c.rgb = mix(c.rgb, upgrade.fog.rgb, low * upgrade.params.z);
+        // WGSL has no assignment to a swizzle: assign the whole vec4.
+        c = vec4(mix(c.rgb, upgrade.fog.rgb, low * upgrade.params.z), c.a);
     }
     var out: FragmentOutput;
     let alpha_mode = pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
