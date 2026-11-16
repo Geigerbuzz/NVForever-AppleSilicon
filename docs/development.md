@@ -99,9 +99,10 @@ playtests, `tools/play/Play.ps1` starts the game at named places
   saved game (saves live in `Documents\My Games\NVForever\saves`).
 - `--no-messages` (with `--play`): message boxes with only an OK button (or none) are
   answered with OK; a script's never opens, so game time does not stop for it (the
-  add-on packs' start-up boxes, at the start and once the player leaves Doc Mitchell's
-  house). Their text is still logged; a box with a choice still waits for the player.
-  Every `--play` smoke scenario runs with it unless it sets `messages = true`.
+  add-on packs' start-up boxes — the four pre-order packs of Courier's Stash deliver at the
+  start only, one box each; the story add-ons' start quests also box once the player leaves
+  Doc Mitchell's house). Their text is still logged; a box with a choice still waits for the
+  player. Every `--play` smoke scenario runs with it unless it sets `messages = true`.
 - `--graphics enhanced`: the optional modern look
   ([design/graphics-enhanced.md](design/graphics-enhanced.md)). The default, `vanilla`, is
   the original's look and the one every test compares. `--sun-shadows` turns on sun
