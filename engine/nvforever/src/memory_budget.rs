@@ -308,6 +308,7 @@ fn ram_share(ram: (u64, u64), aid: Option<u64>) -> f64 {
 }
 
 /// The GPU's heaps from `VK_EXT_memory_budget` and whether it is integrated, or why not.
+#[cfg(not(target_vendor = "apple"))]
 fn read_heaps(device: &RenderDevice) -> Result<Vec<Heap>, String> {
     use ash::vk;
     let wgpu_device = device.wgpu_device();
@@ -327,6 +328,13 @@ fn read_heaps(device: &RenderDevice) -> Result<Vec<Heap>, String> {
     let n = props.memory_properties.memory_heap_count as usize;
     let heaps = props.memory_properties.memory_heaps[..n].iter().enumerate();
     Ok(heaps.map(|(i, h)| Heap { device_local: h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL), budget: budget.heap_budget[i], usage: budget.heap_usage[i] }).collect())
+}
+
+/// Metal has no `VK_EXT_memory_budget`: the budget comes from the device's reported limits
+/// and this process's own figures ([`crate::memory_budget`] falls back the same way).
+#[cfg(target_vendor = "apple")]
+fn read_heaps(_device: &RenderDevice) -> Result<Vec<Heap>, String> {
+    Err("Metal has no VK_EXT_memory_budget".into())
 }
 
 /// The GPU budget, and this process's use of it when the driver gives that, MB.

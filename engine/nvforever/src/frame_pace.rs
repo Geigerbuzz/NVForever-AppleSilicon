@@ -485,8 +485,21 @@ fn vsync_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     }
 }
 
+/// Metal's present modes are not read: on macOS a window's `NSView` may only be touched on
+/// the main thread, and this system runs on the render thread, so making a second surface
+/// here traps (`raw-window-metal`).
+#[cfg(target_vendor = "apple")]
+fn log_present_modes(_windows: Query<(&ExtractedWindow, &RawHandleWrapper)>, _instance: Res<RenderInstance>, _adapter: Res<RenderAdapter>, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    *done = true;
+    info!("frame pace: present modes are not read on macOS (the window's NSView is the main thread's)");
+}
+
 /// Log once the present modes the primary window's surface supports: a surface of its
 /// own on the window, asked and dropped (Bevy's own is private to it).
+#[cfg(not(target_vendor = "apple"))]
 fn log_present_modes(windows: Query<(&ExtractedWindow, &RawHandleWrapper)>, instance: Res<RenderInstance>, adapter: Res<RenderAdapter>, mut done: Local<bool>) {
     if *done {
         return;

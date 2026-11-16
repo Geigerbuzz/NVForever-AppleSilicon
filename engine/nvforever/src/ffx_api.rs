@@ -30,6 +30,8 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+// `Handle` is only needed for the Vulkan image and command-buffer handles (Apple has none).
+#[cfg_attr(target_vendor = "apple", allow(unused_imports))]
 use ash::vk::{self, Handle};
 use bevy::log::{error, info, warn};
 
@@ -539,6 +541,7 @@ fn surface_format(format: wgpu::TextureFormat) -> Option<u32> {
 
 /// A wgpu texture as the API's resource: read-only in `SHADER_READ_ONLY_OPTIMAL`, or the
 /// output, a storage image in `GENERAL`.
+#[cfg(not(target_vendor = "apple"))]
 fn resource(texture: &wgpu::Texture, output: bool) -> Result<Resource, String> {
     let format = surface_format(texture.format()).ok_or_else(|| format!("no FidelityFX format for {:?}", texture.format()))?;
     // SAFETY: only the image's handle is read; the texture outlives the frame's commands.
@@ -557,6 +560,12 @@ fn resource(texture: &wgpu::Texture, output: bool) -> Result<Resource, String> {
         },
         state: if output { RESOURCE_STATE_UNORDERED_ACCESS } else { RESOURCE_STATE_COMPUTE_READ },
     })
+}
+
+/// The FidelityFX API is a Vulkan library ([`crate::ffx_api`]): Metal has no images to give it.
+#[cfg(target_vendor = "apple")]
+fn resource(_texture: &wgpu::Texture, _output: bool) -> Result<Resource, String> {
+    Err("the FidelityFX API library is Vulkan's and this device is Metal".into())
 }
 
 /// What the context was created from: the API wants it alive until the context is destroyed
@@ -580,8 +589,15 @@ pub(crate) struct Upscaler {
 unsafe impl Send for Upscaler {}
 
 impl Upscaler {
+    /// Metal has no Vulkan device to hand the library ([`Upscaler::new`] otherwise).
+    #[cfg(target_vendor = "apple")]
+    pub(crate) fn new(_library: &'static Library, _device: &wgpu::Device, _max_render_size: [u32; 2], _max_upscale_size: [u32; 2]) -> Result<Self, String> {
+        Err("the FidelityFX API library is Vulkan's and this device is Metal".into())
+    }
+
     /// Creates the context: reversed infinite depth, HDR colour, the library's own exposure,
     /// as [`crate::fsr`] gives the port.
+    #[cfg(not(target_vendor = "apple"))]
     pub(crate) fn new(library: &'static Library, device: &wgpu::Device, max_render_size: [u32; 2], max_upscale_size: [u32; 2]) -> Result<Self, String> {
         let (vk_device, physical_device, device_proc_addr) = {
             // SAFETY: only handles are read; nothing is destroyed.
@@ -663,12 +679,20 @@ impl Upscaler {
         let (library, context) = (self.library, &mut self.context);
         // SAFETY: the encoder holds no wgpu commands and gets none; the library records into
         // its Vulkan command buffer and neither ends nor frees it.
+        #[cfg(not(target_vendor = "apple"))]
         let code = unsafe {
             encoder.as_hal_mut::<wgpu::hal::api::Vulkan, _, _>(|raw| {
                 let raw = raw?;
                 desc.command_list = raw.raw_handle().as_raw() as *mut c_void;
                 Some((library.dispatch)(context, &desc.header))
             })
+        };
+        // Metal gives the encoder no Vulkan command buffer, which this path already answers
+        // with a refused frame (the same as a device without the extension).
+        #[cfg(target_vendor = "apple")]
+        let code = {
+            let _ = (&desc, library, context);
+            None::<ReturnCode>
         };
         match code {
             // The encoder is dropped with whatever was recorded: nothing of it runs.
