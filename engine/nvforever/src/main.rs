@@ -151,6 +151,7 @@ mod appearance;
 mod script_look;
 mod script_sequences;
 mod ripples;
+mod rain3d;
 mod settings;
 mod iron_sights;
 mod head_bob;
@@ -400,6 +401,17 @@ struct Args {
     /// docs/spec-notes/world.md §3 "Texture repeat"]).
     #[arg(long, default_value_t = 256.0)]
     terrain_tile: f32,
+    /// 3-D rain: a volume of rain streaks round the camera with splashes where they land,
+    /// while the weather precipitates (the 3D Rain mod's feature, docs/design/rain3d.md).
+    /// Off by default; with it the weather's precipitation model is not drawn (its
+    /// sounds still are). Test aid: NVF_PLAY_TEST_WEATHER_FX=precip=<model> makes every
+    /// weather precipitate, for a screenshot without a rainy weather.
+    #[arg(long)]
+    rain_3d: bool,
+    /// With --rain-3d: the share of the default density drawn, 0 to 2 (1: 4000 streaks;
+    /// 2: the hard cap of 8000; clamped there).
+    #[arg(long, default_value_t = 1.0, requires = "rain_3d")]
+    rain_3d_density: f32,
     /// Do not draw models whose path contains any of these texts (diagnostics).
     #[arg(long, value_delimiter = ',')]
     hide: Vec<String>,
@@ -1541,6 +1553,8 @@ fn main() -> AppExit {
     .add_plugins((window_icon::WindowIconPlugin, window_mode::WindowModePlugin))
     .add_plugins(nvf_play::audio_out::AudioOutPlugin)
     .add_plugins((ArchivePlugin(game), lights::LightsPlugin, fog::FogPlugin, eye_adapt::EyeAdaptPlugin, emittance::EmittancePlugin, water::WaterPlugin, tree::TreePlugin, terrain::TerrainPlugin, reflection::ReflectionPlugin, ripples::RipplesPlugin))
+    // 3-D rain, opt-in: `Rain3dPlugin(None)` adds nothing (`--rain-3d` absent).
+    .add_plugins(rain3d::Rain3dPlugin(args.rain_3d.then_some(args.rain_3d_density)))
     .add_plugins((imagespace::ImageSpacePlugin, sky::SkyPlugin, graphics::GraphicsPlugin(graphics, msaa, frame_times)))
     // The switches the settings page weighs against the INI (`--play` only), for the
     // frame split's start-time decision (perf_overlay/split.rs).

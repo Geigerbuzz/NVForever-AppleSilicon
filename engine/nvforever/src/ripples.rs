@@ -56,6 +56,9 @@ const WAKE_ABOVE: f32 = 40.0;
 /// (300 units/s), and that a body crossing the surface applies once [tuned].
 const WAKE_PER_STEP: f32 = 0.03;
 const SPLASH: f32 = 1.0;
+/// Rain impacts 3-D rain may queue between two steps [design: a few frames' worth; past
+/// this the oldest are dropped, never growing the buffer].
+const MAX_PENDING: usize = 64;
 
 /// One damped wave simulation on the grid.
 struct Sim {
@@ -205,6 +208,12 @@ pub struct Ripples {
     types: HashMap<u32, Option<Water>>,
     configured: Option<u32>,
     texture_dirty: bool,
+    /// Rain drops `rain3d.rs` saw land on water, game (x, y) and WATR FormID, taken at the
+    /// next step (its impacts replace the synthetic drops below while it draws the rain).
+    pending: Vec<(f32, f32, u32)>,
+    /// 3-D rain (`--rain-3d`) draws the rain: its sampled impacts are the rain's drops, so
+    /// the synthetic rain above is left off (bit-identical without the flag).
+    rain3d: bool,
 }
 
 impl Ripples {
@@ -223,6 +232,22 @@ impl Ripples {
             types: HashMap::new(),
             configured: None,
             texture_dirty: false,
+            pending: Vec::new(),
+            rain3d: false,
+        }
+    }
+
+    /// 3-D rain (`rain3d.rs`) draws the rain now: its impacts are the rain's drops.
+    pub fn set_rain3d(&mut self) {
+        self.rain3d = true;
+    }
+
+    /// A drop 3-D rain saw land on water of type `wid` at game (x, y): queued for the next
+    /// simulated step, so the splash appears where the visible streak fell (within the
+    /// grid around the camera).
+    pub fn splash(&mut self, x: f32, y: f32, wid: u32) {
+        if self.pending.len() < MAX_PENDING {
+            self.pending.push((x, y, wid));
         }
     }
 
@@ -422,7 +447,7 @@ fn update_ripples(
     while rp.acc >= STEP {
         rp.acc -= STEP;
         stepped = true;
-        if raining {
+        if raining && !rp.rain3d {
             let force = params.as_ref().map_or(0.0, |(_, w)| w.rain.force);
             rp.drops += DROPS_PER_SECOND * STEP;
             while rp.drops >= 1.0 {
@@ -432,6 +457,23 @@ fn update_ripples(
             }
         }
         rp.step();
+    }
+
+    // 3-D rain's impacts on water (`rain3d.rs`), at the place the streak fell and with that
+    // water's own rain force. Without the flag the queue is always empty and this changes
+    // nothing.
+    if sky.interior.is_none() {
+        for (x, y, wid) in std::mem::take(&mut rp.pending) {
+            let force = rp.types.entry(wid).or_insert_with(|| fnv_world::sky::water(world.lo, world.schema, wid)).clone().map_or(0.0, |w| w.rain.force);
+            if force <= 0.0 {
+                continue;
+            }
+            let g = Vec2::new(x, y) / TEXEL - rp.origin.as_vec2();
+            let changed = rp.rain.impulse(g.x, g.y, DROP_RADIUS / TEXEL, force);
+            rp.texture_dirty |= changed && stepped;
+        }
+    } else {
+        rp.pending.clear();
     }
 
     // A body at the surface: ripples while it moves, a splash when it crosses.
@@ -481,6 +523,20 @@ mod tests {
 
     fn fixture() -> Ripples {
         Ripples::new(Handle::default())
+    }
+
+    #[test]
+    fn rain3d_impacts_wait_for_a_step_and_stay_capped() {
+        let mut rp = fixture();
+        assert!(rp.pending.is_empty() && !rp.rain3d);
+        rp.set_rain3d();
+        assert!(rp.rain3d);
+        rp.splash(100.0, 200.0, 7);
+        assert_eq!(rp.pending, vec![(100.0, 200.0, 7)]);
+        for i in 0..MAX_PENDING * 2 {
+            rp.splash(i as f32, 0.0, 1);
+        }
+        assert_eq!(rp.pending.len(), MAX_PENDING, "the queue never grows past its cap");
     }
 
     #[test]
