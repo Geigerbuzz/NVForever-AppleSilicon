@@ -44,6 +44,13 @@ impl GameData {
                 return None;
             }
         };
+        // Test aid `NVF_TRACE_TEXTURES=1`: every texture the engine reads, with the source
+        // that served it ("loose" is a mod's file, anything else is an archive). A texture
+        // mod is confirmed by its files being read, not only by a spot in a picture.
+        if std::env::var_os("NVF_TRACE_TEXTURES").is_some() && path.to_ascii_lowercase().ends_with(".dds") {
+            let source = self.vfs.source_of(path).unwrap_or("<none>");
+            info!(path = %path, source = %source, loose = ?self.vfs.loose_path(path), "texture read");
+        }
         test_broken(path, bytes)
     }
 }
