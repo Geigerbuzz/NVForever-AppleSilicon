@@ -27,6 +27,11 @@
 //! - A moon disc opposite the sun (where the night light comes from), textured
 //!   `sky\masser_<phase>.dds` by the climate's phase length and the days passed, faded in
 //!   as the sun goes from +5° to −6° [hypothesis].
+//! - Optional moonlight (`--moonlight`, [`Moonlight`]): a second directional light at the
+//!   disc's place, coloured the weather's night "sunlight" and dimmed with the moon's
+//!   phase. It is MoonlightNVSE's feature (Nexus 77683) rebuilt natively, since the
+//!   extender's 32-bit plugin cannot load here, and is off by default: with it off no
+//!   light is added and the picture is the original's, bit for bit.
 //!
 //! Every sky part uses `SkyMaterial` (sky.wesl): its colour is a display value, mapped
 //! through the inverse of the camera's tonemapper so the image-space grade sees the
@@ -127,6 +132,9 @@ pub(crate) fn sorts_with_sky(sort_key: f32) -> bool {
 pub const DEFAULT_SHADOW_DISTANCE: f32 = 8_000.0;
 /// The sun's shadow cascades by default (see [`DEFAULT_SHADOW_DISTANCE`]).
 pub const DEFAULT_SHADOW_CASCADES: usize = 3;
+/// The moonlight's strength when `--moonlight` is not given: off, so the picture is the
+/// original's (the project is parity-first; [`Moonlight`]).
+pub const DEFAULT_MOONLIGHT: f32 = 0.0;
 
 /// Shares of the weather's and the interior's light colours (display values) in the
 /// display-value lighting sum (lights.rs `DISPLAY_HELPERS`; world.md §8 "Light on
@@ -1072,6 +1080,19 @@ impl SkyState {
         game_to_bevy().rotation * Vec3::from_array(sun_direction(&self.climate, self.hour, SUN_SOUTH))
     }
 
+    /// Direction towards the moon in Bevy's axes: opposite the sun, where the disc is drawn
+    /// (below the horizon by day).
+    pub fn moon_dir(&self) -> Vec3 {
+        self.moon_dir_at(self.hour)
+    }
+
+    /// The moon's direction at `hour` (see [`Self::moon_dir`]); the light follows
+    /// [`SkyState::sun_light_hour`], as the sun light does, so its shadows do not step with
+    /// the sky's half-minute clock.
+    pub fn moon_dir_at(&self, hour: f32) -> Vec3 {
+        -(game_to_bevy().rotation * Vec3::from_array(sun_direction(&self.climate, hour, SUN_SOUTH)))
+    }
+
     /// Direction towards the sun, in game axes (also below the horizon).
     pub fn sun_dir_game(&self) -> [f32; 3] {
         sun_direction(&self.climate, self.hour, SUN_SOUTH)
@@ -1109,6 +1130,13 @@ impl SkyState {
     /// Index into MOON_PHASES for the current day.
     pub fn moon_phase(&self) -> usize {
         moon_phase(self.days_passed + self.hour / 24.0, self.climate.moon_phase_length())
+    }
+
+    /// The share of the moon's disc that is lit at the current day (0 new, 1 full), for the
+    /// moonlight: a new moon lights nothing, a full moon all of it [hypothesis: the plugin's
+    /// light follows the disc's phase; the game's own night light does not].
+    pub fn moon_phase_share(&self) -> f32 {
+        moon_phase_share(self.moon_phase())
     }
 
     /// The time, sun elevation and the luminance of the light and sky colours at this
@@ -1225,6 +1253,29 @@ pub struct CloudLayer {
 
 #[derive(Component)]
 pub struct Sun;
+
+/// The moon's light (`--moonlight`): a second directional light from the moon disc's place,
+/// MoonlightNVSE's feature (Nexus 77683) rebuilt natively — the extender's 32-bit DLL cannot
+/// load here. Off by default ([`DEFAULT_MOONLIGHT`]): with factor 0 [`drive_moonlight`] makes
+/// no light, so a run without the flag is the original's picture, bit for bit.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Moonlight {
+    /// Multiplier on the moon light's strength (0: off). At 1 a full moon above the horizon
+    /// lights the world as strongly as the weather's night "sunlight" at [`MOON_SHARE`], on
+    /// top of that share the sun light keeps below the horizon [hypothesis: the plugin's
+    /// brightness range starts at the game's own night light].
+    pub factor: f32,
+    /// The moon casts shadows, from one cascade of its own (see [`drive_moonlight`]). At
+    /// night the sun light already shines from the moon's place (`aim_sun`), so with the
+    /// sun's shadows on this is a second pass of nearly the same shadows; it is for runs
+    /// with the sun's shadows off.
+    pub shadows: bool,
+}
+
+/// The moon's directional light ([`Moonlight`]); never [`Sun`], so the sun's cascades,
+/// shadow quality, arms-shade light and scripts stay the sun's.
+#[derive(Component)]
+pub struct MoonLight;
 
 /// Render layer of what casts a sun shadow without being seen: the sun casts from it and
 /// from the world's layer 0, and no camera draws it (the player's body in first person,
@@ -1521,8 +1572,9 @@ pub fn reach_toward_light(cascade: &mut bevy::light::cascade::Cascade, extra: f3
 }
 
 /// Stretch the sun's shadow cascades [`SUN_REACH_BACK`] toward the sun (PostUpdate, after
-/// Bevy builds them each frame and before their frusta and shadow views are made).
-pub fn reach_toward_sun(mut suns: Query<&mut bevy::light::Cascades, With<Sun>>) {
+/// Bevy builds them each frame and before their frusta and shadow views are made); the moon
+/// light's single cascade the same way toward the moon.
+pub fn reach_toward_sun(mut suns: Query<&mut bevy::light::Cascades, Or<(With<Sun>, With<MoonLight>)>>) {
     for mut cascades in &mut suns {
         for view in cascades.cascades.values_mut() {
             for cascade in view.iter_mut() {
@@ -1532,15 +1584,15 @@ pub fn reach_toward_sun(mut suns: Query<&mut bevy::light::Cascades, With<Sun>>) 
     }
 }
 
-/// Drop the sun's casters that cannot shade anything a cascade covers. Seen from the sun,
-/// a caster shades a receiver only if it covers it, and a cascade's receivers all lie in
-/// the slice of the camera's view it was fitted to; Bevy draws everything in the square
-/// around that slice's outline (`bevy_light` `calculate_cascade`), so the square's corners
-/// hold casters for nothing. Kept: whatever comes within [`SLICE_MARGIN_TEXELS`] of the
-/// outline, for the shadow filter's reach.
+/// Drop the sun's (and the moon light's) casters that cannot shade anything a cascade
+/// covers. Seen from the light, a caster shades a receiver only if it covers it, and a
+/// cascade's receivers all lie in the slice of the camera's view it was fitted to; Bevy
+/// draws everything in the square around that slice's outline (`bevy_light`
+/// `calculate_cascade`), so the square's corners hold casters for nothing. Kept: whatever
+/// comes within [`SLICE_MARGIN_TEXELS`] of the outline, for the shadow filter's reach.
 #[allow(clippy::type_complexity)]
 pub fn sun_casters_over_slice(
-    mut suns: Query<(&mut bevy::camera::visibility::CascadesVisibleEntities, &bevy::light::Cascades, &CascadeShadowConfig, &GlobalTransform), With<Sun>>,
+    mut suns: Query<(&mut bevy::camera::visibility::CascadesVisibleEntities, &bevy::light::Cascades, &CascadeShadowConfig, &GlobalTransform), Or<(With<Sun>, With<MoonLight>)>>,
     views: Query<(&GlobalTransform, &Projection)>,
     casters: Query<(&bevy::camera::primitives::Aabb, &GlobalTransform)>,
 ) {
@@ -1621,6 +1673,12 @@ pub(crate) fn shadow_cascades(distance: f32, reach: f32, count: usize) -> Cascad
 pub fn sun_height_and_fade(sky: &SkyState) -> (f32, f32) {
     let y = (game_to_bevy().rotation * Vec3::from_array(sun_direction(&sky.climate, sky.hour, SUN_SOUTH))).y;
     (y, (y.abs() / HORIZON_FADE.sin()).min(1.0))
+}
+
+/// The lit share of the moon's disc at `phase` (MOON_PHASES order: full at 0, new at 4):
+/// (1 + cos(2π · phase / 8)) / 2, the fraction the phase's texture shows lit.
+pub fn moon_phase_share(phase: usize) -> f32 {
+    0.5 * (1.0 + (PI * phase as f32 / 4.0).cos())
 }
 
 /// Switch the sun's shadows on or off now (the settings page); they reach
@@ -1743,7 +1801,6 @@ pub fn update_night_sky(
     let Ok(cam_t) = cam.single() else { return };
     let cam_pos = cam_t.translation;
     let indoors = sky.interior.is_some();
-    let sun_dir = game_to_bevy().rotation * Vec3::from_array(sun_direction(&sky.climate, sky.hour, SUN_SOUTH));
     let (star_vis, moon_vis) = if indoors { (0.0, 0.0) } else { sky.night_visibility() };
     let refresh = *last != Some((sky.hour, sky.days_passed));
     *last = Some((sky.hour, sky.days_passed));
@@ -1764,7 +1821,7 @@ pub fn update_night_sky(
         }
     }
     for (mut t, m, mut disc) in &mut moon {
-        let moon_dir = -sun_dir;
+        let moon_dir = sky.moon_dir();
         if indoors || moon_vis <= 0.0 || moon_dir.y < -0.1 {
             t.scale = Vec3::ZERO;
             continue;
@@ -1783,6 +1840,94 @@ pub fn update_night_sky(
                 }
             }
             disc.shown = Some(phase);
+        }
+    }
+}
+
+/// Make, aim and colour the moon light ([`Moonlight`]): the moon disc's light, a second
+/// directional light from the moon's place, opposite the sun. It takes the weather's night
+/// "sunlight" (the colour the sun light below the horizon has), at
+/// [`Moonlight::factor`] × [`MOON_SHARE`] of that colour's full light, dimmed with the
+/// moon's phase and as the moon rises (`night_visibility`). MoonlightNVSE's feature (Nexus
+/// 77683) rebuilt natively.
+///
+/// The light exists only while it has strength: at 0 (day, a new moon, the option off) it is
+/// despawned rather than left at an illuminance of 0, so nothing about the lights changes
+/// when the feature is off and the picture is the original's, bit for bit.
+///
+/// Shadows are the option's own (`Moonlight::shadows`): Bevy makes a shadow map per light
+/// and a light's cascades cannot be borrowed by another, so the moon gets one cascade of its
+/// own, reaching `graphics::MOON_SHADOW_DISTANCE` (the cheaper night reach the sun light
+/// uses below the horizon), made only while the light exists. Its casters are pruned like
+/// the sun's (`sun_casters_over_slice`, `reach_toward_sun`). By night the sun light already
+/// shines from the moon's place (`aim_sun`), so with `--sun-shadows` on, the moon's own pass
+/// draws nearly the same shadows again: the option is for runs with the sun's shadows off.
+#[allow(clippy::type_complexity)]
+pub fn drive_moonlight(
+    mut commands: Commands,
+    sky: Res<SkyState>,
+    settings: Res<Moonlight>,
+    screen: Option<Res<crate::imagespace::ScreenModifiers>>,
+    lights: Query<Entity, With<MoonLight>>,
+    mut moon: Query<(&mut DirectionalLight, &mut Transform, Has<CascadeShadowConfig>), With<MoonLight>>,
+) {
+    let (_, moon_vis) = sky.night_visibility();
+    let share = if sky.interior.is_some() || !sky.climate.has_moon() {
+        0.0
+    } else {
+        settings.factor.max(0.0) * moon_vis * sky.moon_phase_share()
+    };
+    if share <= 0.0 || !share.is_finite() {
+        for e in &lights {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
+    let to_bevy = game_to_bevy();
+    let axis = to_bevy.rotation * Vec3::Y;
+    let dir = sky.moon_dir_at(sky.sun_light_hour());
+    let target = Transform::IDENTITY.looking_to(-dir, axis);
+    let color = crate::lights::display_color(sky.color(ColorType::Sunlight).map(crate::lights::linear_to_display));
+    // The image space modifiers' Sunlight Dimmer, as the sun light gets it in `update_sky`.
+    let sun_mod = screen.as_deref().map_or(1.0, |s| s.hdr_ratio(fnv_world::imagespace::HDR_SUNLIGHT_DIMMER));
+    let illuminance = PI * light_unit() * sky.sun_scale() * sun_mod * MOON_SHARE * share;
+    match moon.single_mut() {
+        // The shadow switch is fixed when a light is made: Bevy replaces a light's shadow
+        // views when it flips, and the old ones upset the shadow passes' batches
+        // (player_body.rs `shade_light`). A changed setting makes the light again.
+        Ok((_, _, cascades)) if cascades != settings.shadows => {
+            for e in &lights {
+                commands.entity(e).despawn();
+            }
+        }
+        Ok((mut light, mut t, _)) => {
+            // Written only when it moved: each write marks the light changed for extraction.
+            if light.color != color {
+                light.color = color;
+            }
+            if light.illuminance != illuminance {
+                light.illuminance = illuminance;
+            }
+            t.set_if_neq(target);
+        }
+        Err(_) => {
+            let mut e = commands.spawn((
+                Name::new("Moon light"),
+                MoonLight,
+                DirectionalLight { color, illuminance, shadow_maps_enabled: settings.shadows, ..default() },
+                target,
+                // The sun's layers: the same views and the same casters.
+                RenderLayers::from_layers(&[0, SHADOW_LAYER, BODY_LAYER]),
+            ));
+            if settings.shadows {
+                e.insert(shadow_cascades(crate::graphics::MOON_SHADOW_DISTANCE, 1.0, 1));
+            }
+            info!(
+                "moonlight: a moon light from the {} moon, {:.2} of the weather's night sunlight{}",
+                MOON_PHASES[sky.moon_phase()],
+                share,
+                if settings.shadows { " (its own shadows)" } else { "" }
+            );
         }
     }
 }
@@ -2710,5 +2855,19 @@ mod tests {
         // Half of a colour as display values is darker than half in linear light.
         let half = dome_color(90.0, 0.5, 1.0, lower, horizon, upper)[2];
         assert!(half < 0.5 * upper[2] + 0.5 * horizon_weight(90.0, 1.0) * horizon[2]);
+    }
+
+    #[test]
+    fn the_moonlights_phase_follows_the_disc() {
+        // MOON_PHASES: full, gibbous, half, crescent, new, crescent, half, gibbous.
+        assert!((moon_phase_share(0) - 1.0).abs() < 1e-6);
+        assert!((moon_phase_share(2) - 0.5).abs() < 1e-6);
+        assert!(moon_phase_share(4).abs() < 1e-6);
+        assert!((moon_phase_share(6) - 0.5).abs() < 1e-6);
+        // Symmetric about the new moon, and never negative (a negative light would darken).
+        for i in 0..8 {
+            assert!((moon_phase_share(i) - moon_phase_share(8 - i)).abs() < 1e-6, "{i}");
+            assert!((0.0..=1.0).contains(&moon_phase_share(i)), "{i}");
+        }
     }
 }

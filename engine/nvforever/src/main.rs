@@ -438,6 +438,18 @@ struct Args {
     /// Multiplier on every light's brightness (LIGH colour × fade; 1 = as stored).
     #[arg(long, default_value_t = 1.0)]
     light_scale: f32,
+    /// Moonlight: a second directional light from the moon's place, opposite the sun,
+    /// coloured the weather's night "sunlight" and dimmed with the moon's phase and height.
+    /// MoonlightNVSE's feature (Nexus 77683) rebuilt natively; 0 (the default) is off and
+    /// leaves the picture as the original's, and 1 lights a full-moon night as strongly as
+    /// the engine's own night light.
+    #[arg(long, default_value_t = sky::DEFAULT_MOONLIGHT)]
+    moonlight: f32,
+    /// The moon casts shadows too, from one cascade of its own (a shadow pass more while the
+    /// moon shines). With --sun-shadows the sun light already casts from the moon's place by
+    /// night, so this is for runs with the sun's shadows off.
+    #[arg(long)]
+    moonlight_shadows: bool,
     /// Test aid: fly forward at this speed (game units per second).
     #[arg(long, default_value_t = 0.0)]
     auto_fly: f32,
@@ -1205,6 +1217,12 @@ fn main() -> AppExit {
         sky_state.shadow_distance = args.shadow_distance;
     }
     sky_state.grade = !args.no_grade;
+    if !args.moonlight.is_finite() || args.moonlight < 0.0 {
+        return fail(format!("--moonlight {}: expected a strength of 0 or more (0: off)", args.moonlight));
+    }
+    if args.moonlight_shadows && args.moonlight <= 0.0 {
+        return fail("--moonlight-shadows needs --moonlight above 0".into());
+    }
     let mut screen_modifiers = imagespace::ScreenModifiers::default();
     for arg in &args.imod {
         match imagespace::parse_forced(&world, arg) {
@@ -1557,6 +1575,7 @@ fn main() -> AppExit {
     .insert_resource(ClearColor(Color::srgb(0.62, 0.72, 0.85)))
     .insert_resource(GlobalAmbientLight { brightness: 600.0, ..default() })
     .insert_resource(sky_state)
+    .insert_resource(sky::Moonlight { factor: args.moonlight, shadows: args.moonlight_shadows })
     .insert_resource(screen_modifiers)
     .insert_resource(fly::AutoFly(args.auto_fly))
     .insert_resource(lod::LodState::new(&world, lod_settings(&args), !args.no_lod && interior.is_none(), lodgen).with_origin(lod_origin))
@@ -1611,6 +1630,8 @@ fn main() -> AppExit {
     .insert_resource(args.clone())
     .add_systems(Startup, (world::setup_root, setup, sky::setup_sky))
     .add_systems(Update, sky::tell_sky_colors.after(sky::update_sky))
+    // The moon light reads the sky after its clock step (sky.rs `drive_moonlight`).
+    .add_systems(Update, sky::drive_moonlight.after(sky::update_sky))
     .add_systems(Update, (fly::fly.run_if(move || play.is_none()), sky::sky_keys.run_if(move || play.is_none()), sky::weather_region.after(nvf_play::PlaySet::Physics), sky::update_sky, sky::interior_clip, sky::update_clouds, sky::update_night_sky, world::stream.run_if(world::world_not_held), imposters::update, fade::fade_cells, world::face_billboards, lod::update_lod, treelod::update_distant_trees, overlay, keys).chain())
     .add_systems(Update, world::note_other_cameras.after(world::stream))
     .add_systems(Update, (cell_buffer::remember, cell_buffer::tell_game).chain().after(world::stream))
