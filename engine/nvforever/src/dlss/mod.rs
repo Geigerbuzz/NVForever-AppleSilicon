@@ -1033,23 +1033,11 @@ pub(crate) fn dlss_pass(
 /// feature the adapter has, and `features` is only OR-ed in on top.
 pub fn render_plugin() -> bevy::render::RenderPlugin {
     let adapter_name = adapter_pin();
-    #[cfg(target_vendor = "apple")]
-    let disabled_features = {
-        use bevy::render::settings::WgpuFeatures;
-        Some(WgpuFeatures::TEXTURE_BINDING_ARRAY | WgpuFeatures::BUFFER_BINDING_ARRAY)
-    };
     if adapter_name.is_none() {
-        #[cfg(not(target_vendor = "apple"))]
         return bevy::render::RenderPlugin::default();
     }
     bevy::render::RenderPlugin {
-        render_creation: bevy::render::settings::WgpuSettings {
-            adapter_name,
-            #[cfg(target_vendor = "apple")]
-            disabled_features,
-            ..default()
-        }
-        .into(),
+        render_creation: bevy::render::settings::WgpuSettings { adapter_name, ..default() }.into(),
         ..default()
     }
 }
