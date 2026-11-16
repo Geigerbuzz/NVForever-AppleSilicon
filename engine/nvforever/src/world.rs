@@ -68,7 +68,15 @@ pub fn open_plugins(data_dir: &Path, mods: &[PathBuf], names: &[String]) -> Open
         let path = fnv_install::plugins::plugin_path_in(data_dir, mods, n);
         match EsmPlugin::open(path) {
             Ok(mut p) => {
-                p.name = n.clone();
+                // The plugin's name is its file name, not the argument that named it: a
+                // plugin in the mods overlay has to be given by path (it is not in Data),
+                // and keeping the path as the name made every master it names look missing
+                // ("plugin /…/IntoTheValley.esp left out: … IntoTheValley.esm is missing"),
+                // so a mod given by path could not load at all.
+                p.name = std::path::Path::new(n)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .map_or_else(|| n.clone(), str::to_string);
                 plugins.push(p)
             }
             Err(e) => dropped.push(format!("plugin {n} left out: cannot be read: {e}")),
