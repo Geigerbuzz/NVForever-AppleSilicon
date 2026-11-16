@@ -365,6 +365,12 @@ struct Args {
     /// shadow_thin.rs); 0, the default, lets everything cast as far as the shadows reach.
     #[arg(long, default_value_t = shadow_thin::DEFAULT_RATIO)]
     shadow_thin: f32,
+    /// The shadow budget (`<casters>,<passes>`, shadow_rate.rs `ShadowBudget`): the most
+    /// casters one cascade draws and the most cascade maps one frame draws, 0 for either
+    /// being no cap (the default). The nearest cascades stay in, the farthest are held over
+    /// a frame; within a cascade the smallest casters go first.
+    #[arg(long, default_value = "0,0")]
+    shadow_budget: String,
     /// Samples per pixel for anti-aliasing: 1 (off), 2, 4 or 8. The cut-out edges of
     /// alpha-tested shapes (plants, fences, hair, grass) are smoothed with it too, like
     /// the game's transparency multisampling; with 1 they are tested per pixel.
@@ -1546,7 +1552,7 @@ fn main() -> AppExit {
     .add_plugins(draw_distance::DrawDistancePlugin(draw_distance::DrawDistances::new(&args)))
     // Small objects far away cast no sun shadows (shadow_thin.rs).
     .add_plugins(shadow_thin::ShadowThinPlugin(args.shadow_thin))
-    .add_plugins(shadow_rate::ShadowRatePlugin { performance: performance_shadows })
+    .add_plugins(shadow_rate::ShadowRatePlugin { performance: performance_shadows, budget: shadow_rate::ShadowBudget::parse(&args.shadow_budget) })
     // Interiors draw the rooms seen through portals only (rooms.rs).
     .add_plugins(rooms::RoomsPlugin { off: args.no_room_culling, planes_off: args.no_occlusion_planes, planes_outdoors: args.occlusion_planes_outdoors })
     .insert_resource(ClearColor(Color::srgb(0.62, 0.72, 0.85)))

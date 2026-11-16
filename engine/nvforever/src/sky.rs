@@ -1538,11 +1538,19 @@ pub fn reach_toward_sun(mut suns: Query<&mut bevy::light::Cascades, With<Sun>>) 
 /// around that slice's outline (`bevy_light` `calculate_cascade`), so the square's corners
 /// hold casters for nothing. Kept: whatever comes within [`SLICE_MARGIN_TEXELS`] of the
 /// outline, for the shadow filter's reach.
+///
+/// Also dropped, in every cascade on its own: a caster thinner than [`MIN_CASTER_TEXELS`]
+/// of that cascade's shadow-map texels. A caster's shadow is its silhouette seen from the
+/// sun, so one that covers less than the filter's reach of the map cannot darken it as much
+/// as the filter blurs; the far cascade's texels are about twelve times the first's, so
+/// this takes the far clutter (fence posts, wires, small rocks) and leaves everything near
+/// the camera. And the [`ShadowBudget`]'s casters a cascade: the smallest go first.
 #[allow(clippy::type_complexity)]
 pub fn sun_casters_over_slice(
     mut suns: Query<(&mut bevy::camera::visibility::CascadesVisibleEntities, &bevy::light::Cascades, &CascadeShadowConfig, &GlobalTransform), With<Sun>>,
     views: Query<(&GlobalTransform, &Projection)>,
     casters: Query<(&bevy::camera::primitives::Aabb, &GlobalTransform)>,
+    budget: Res<crate::shadow_rate::ShadowBudget>,
 ) {
     for (mut visible, cascades, config, light) in &mut suns {
         let light_from_world = Mat3::from_quat(light.rotation()).transpose();
@@ -1554,6 +1562,7 @@ pub fn sun_casters_over_slice(
             for ((list, c), (near, far)) in lists.iter_mut().zip(cs).zip(&bounds) {
                 let outline = hull(projection.get_frustum_corners(-near, -far).map(|p| (light_from_world * Vec3::from(world_from_view.transform_point3a(p))).truncate()));
                 let margin = SLICE_MARGIN_TEXELS * c.texel_size;
+                let thin = min_caster_texels() * c.texel_size;
                 list.entities.retain(|e| {
                     let Ok((aabb, at)) = casters.get(*e) else { return true };
                     let place = at.affine();
@@ -1561,8 +1570,24 @@ pub fn sun_casters_over_slice(
                     let m = light_from_world * Mat3::from(place.matrix3);
                     let half = Vec3::from(aabb.half_extents);
                     let reach = Vec2::new(m.row(0).abs().dot(half), m.row(1).abs().dot(half));
-                    overlaps(&outline, centre, reach + margin)
+                    // The thinner way it covers the map decides: a fence post or a wire is
+                    // thin across and long along, and its shadow no more than a texel wide.
+                    reach.min_element() >= thin && overlaps(&outline, centre, reach + margin)
                 });
+                // The budget's casters a cascade: the ones whose silhouette covers the least
+                // of the map go first (the smallest and the farthest).
+                if budget.casters > 0 && list.entities.len() > budget.casters {
+                    let area = |e: Entity| -> f32 {
+                        let Ok((aabb, at)) = casters.get(e) else { return f32::INFINITY };
+                        let place = at.affine();
+                        let m = light_from_world * Mat3::from(place.matrix3);
+                        let half = Vec3::from(aabb.half_extents);
+                        let reach = Vec2::new(m.row(0).abs().dot(half), m.row(1).abs().dot(half));
+                        reach.x * reach.y
+                    };
+                    list.entities.sort_by(|a, b| area(*b).total_cmp(&area(*a)));
+                    list.entities.truncate(budget.casters);
+                }
             }
         }
     }
@@ -1571,6 +1596,28 @@ pub fn sun_casters_over_slice(
 /// How far past a slice's outline a caster still counts, in the cascade's shadow-map
 /// texels [engineering choice: wider than the shadow filter's reach, a few texels].
 const SLICE_MARGIN_TEXELS: f32 = 8.0;
+
+/// How thin (in the cascade's own shadow-map texels) a caster may be across and still
+/// cast: the Gaussian filter reads two texels either way of a fragment
+/// (`bevy_pbr` `shadow_sampling.wesl` `sample_shadow_map_castano_thirteen`, offsets -2..+2),
+/// so a caster that covers no more than that cannot darken a texel much, and which texels
+/// it grazes is arbitrary. 2 leaves every shadow near the camera (the first cascade's
+/// texel is about 0.8 units) and takes the far cascade's clutter. Test aid
+/// `NVF_PLAY_TEST_SHADOW_CASTERS=<texels>` (`0`: nothing is dropped); measured in
+/// docs/design/frame-rate-audit.md §10.
+pub const MIN_CASTER_TEXELS: f32 = 2.0;
+
+/// [`MIN_CASTER_TEXELS`], or the test aid's.
+fn min_caster_texels() -> f32 {
+    static TEXELS: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *TEXELS.get_or_init(|| {
+        std::env::var("NVF_PLAY_TEST_SHADOW_CASTERS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(MIN_CASTER_TEXELS)
+    })
+}
 
 /// The convex hull of `points`, counter-clockwise (monotone chain).
 fn hull<const N: usize>(mut points: [Vec2; N]) -> Vec<Vec2> {

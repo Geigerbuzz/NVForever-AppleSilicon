@@ -19,6 +19,20 @@
 //! - **A tree casts a shadow only within [`TREE_SHADOW_NEAR`] of the camera**
 //!   ([`far_trees_cast_no_shadow`]): a SpeedTree tree is thousands of leaf cards and a
 //!   finely divided trunk in every cascade it falls in.
+//! - **One cascade a frame, and the far one less often** ([`PERFORMANCE_SCHEDULE`]): the
+//!   nearest every other frame as before, the far one every fourth, and never both in one
+//!   frame. 0.75 maps a frame instead of 1.0, and no frame carries two shadow passes --
+//!   which is the frame that cannot be paid for when the frame time is held to the refresh
+//!   rate.
+//! - **The shadow budget** ([`ShadowBudget`], `--shadow-budget=<casters>,<passes>`): a cap
+//!   on the cascade maps a frame draws and on the casters one cascade draws, the nearest
+//!   cascades kept and the farthest and smallest left out.
+//!
+//! A cascade whose light-space grid is unchanged since the frame that drew its map is
+//! held in both modes ([`UNCHANGED_HOLD_FRAMES`]): Bevy rounds each cascade's grid to whole
+//! texels, so an unchanged grid would redraw the same depth. A still camera therefore
+//! draws the far cascade once and no more, and a cascade the fog hides is held as well
+//! ([`fog_hidden`]).
 //!
 //! Quality (the default) draws the sun's cascades on a staggered schedule
 //! ([`STAGGERED_SCHEDULE`], #2063): the nearest every frame, the middle one every other
@@ -33,7 +47,8 @@
 use crate::fly::FlyCam;
 use crate::sky::SkyState;
 use bevy::ecs::entity::EntityHashMap;
-use bevy::light::{Cascades, DirectionalLight, DirectionalLightShadowMap, NotShadowCaster, SimulationLightSystems};
+use bevy::light::cascade::Cascade;
+use bevy::light::{CascadeShadowConfig, Cascades, DirectionalLight, DirectionalLightShadowMap, NotShadowCaster, SimulationLightSystems};
 use bevy::pbr::HoldDirectionalShadowMaps;
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResourcePlugin;
@@ -171,14 +186,76 @@ fn far_trees_cast_no_shadow(
 
 /// How often each cascade's map is drawn, nearest cascade first: `(n, phase)` draws it on
 /// the frames where (frame + phase) is a multiple of n; a cascade past the list is drawn
-/// every frame. With the switch on, both cascades every other frame, together.
-pub const PERFORMANCE_SCHEDULE: [(u32, u32); 2] = [(2, 0), (2, 0)];
+/// every frame. With the switch on, the nearest cascade every other frame, as it was, and
+/// the far one every fourth -- the cadence Quality gives its own far cascade, and the one
+/// map that holds almost every caster in the two-cascade split ([17, 874] of 891 at
+/// Goodsprings, reports/exp-shadow-anomaly.md §1.1). The two are never drawn in the same
+/// frame: 0.75 maps a frame at no more than one, where both together put two shadow passes,
+/// their culling and their preparation into every other frame -- and a frame time held to
+/// 120 a second is set by that frame, not by the mean.
+pub const PERFORMANCE_SCHEDULE: [(u32, u32); 2] = [(2, 0), (4, 1)];
 /// With the switch off: the nearest cascade every frame, the middle one every other frame
 /// and the farthest every fourth, on different frames, so at most two are drawn in one
 /// frame (1.75 of 3 on average). The farthest holds most of the casters (about 1,150 of
 /// 1,400 at Goodsprings, 1,570 of 2,140 at Novac), and its shadows are the coarsest, so a
 /// moving thing's shadow there moving at a quarter of the frame rate shows least.
 pub const STAGGERED_SCHEDULE: [(u32, u32); 3] = [(1, 0), (2, 1), (4, 2)];
+
+/// A cascade whose cascade matrices are the ones the frame that drew its map had is held
+/// this many frames at most: its grid did not move (Bevy rounds it to whole texels,
+/// `bevy_light` `cascade.rs` `calculate_cascade`), so drawing it again writes the same
+/// depth in the same texels, but a caster that moves while the view does not still has to
+/// be drawn: at 120 a second this is one draw in 66 ms.
+pub const UNCHANGED_HOLD_FRAMES: u16 = 8;
+
+/// The shadow budget: what the sun's shadows may draw in a frame, degrading gracefully --
+/// the nearest cascades stay in and the farthest are held over to the next frame (their
+/// maps and matrices kept, as for any held cascade), and within a cascade the smallest
+/// casters go first (`crate::sky::sun_casters_over_slice`). `--shadow-budget=<casters>,
+/// <passes>`; 0 for either is no cap, which is the default.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShadowBudget {
+    /// Most casters drawn from one cascade; 0, no cap.
+    pub casters: usize,
+    /// Most cascade maps drawn in one frame; 0, no cap.
+    pub passes: usize,
+}
+
+impl ShadowBudget {
+    /// `casters,passes`; a part that is missing or not a number counts as 0 (no cap).
+    pub fn parse(text: &str) -> Self {
+        let number = |v: Option<&str>| v.and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+        let mut parts = text.split(',');
+        Self { casters: number(parts.next()), passes: number(parts.next()) }
+    }
+}
+
+/// Whether cascade `now` draws the same map as `kept`: the same light-space grid, with the
+/// same matrices to read it with.
+fn unchanged(now: &Cascade, kept: &Cascade) -> bool {
+    now.clip_from_world == kept.clip_from_world && now.world_from_cascade == kept.world_from_cascade && now.clip_from_cascade == kept.clip_from_cascade
+}
+
+/// The cascades (a bit each, from the second on) whose every receiver the fog hides: at
+/// the cascade's near boundary the fog is already opaque, so nothing in its slice changes
+/// colour whether it is lit or shadowed, and drawing the cascade cannot change a pixel.
+/// The first cascade is left alone: the arms' shade light and the ground at the player's
+/// feet are in it.
+fn fog_hidden(sky: &SkyState, config: &CascadeShadowConfig, count: usize) -> u32 {
+    let range = sky.fog_override.map(|(near, far)| (near, far, 1.0)).or_else(|| sky.fog());
+    let Some((near, far, strength)) = range else { return 0 };
+    if strength < 0.99 {
+        return 0;
+    }
+    let power = sky.fog_power();
+    let overlap = 1.0 - config.overlap_proportion;
+    (1..count.min(32))
+        .filter(|&i| {
+            let from = config.bounds.get(i - 1).map_or(config.minimum_distance, |bound| bound * overlap);
+            crate::fog::share(near.max(0.0), far, power, from) >= 0.995
+        })
+        .fold(0, |mask, i| mask | 1 << i)
+}
 
 /// The cascades (a bit each, nearest first) whose maps frame `frame` keeps from an earlier
 /// frame under `schedule`, of `cascades` cascades.
@@ -212,13 +289,17 @@ fn staggered() -> bool {
 /// the directional lights back those cascades as the frame that drew them had them, and
 /// have the renderer keep their maps (module notes). Runs after Bevy has built this
 /// frame's cascades and before it fits the lights' frusta to them.
+#[allow(clippy::too_many_arguments)]
 fn hold_cascades(
     on: Res<PerformanceShadows>,
     map: Option<Res<DirectionalLightShadowMap>>,
+    sky: Option<Res<SkyState>>,
+    budget: Res<ShadowBudget>,
     mut hold: ResMut<HoldDirectionalShadowMaps>,
-    mut lights: Query<(Entity, &mut Cascades), With<DirectionalLight>>,
+    mut lights: Query<(Entity, &mut Cascades, Option<&CascadeShadowConfig>), With<DirectionalLight>>,
     mut kept: Local<EntityHashMap<Cascades>>,
     mut frame: Local<u64>,
+    mut since: Local<Vec<u16>>,
     mut said: Local<Option<bool>>,
 ) {
     *frame = frame.wrapping_add(1);
@@ -229,20 +310,63 @@ fn hold_cascades(
     } else {
         &[]
     };
-    let count = lights.iter().flat_map(|(_, c)| c.cascades.values().map(Vec::len)).max().unwrap_or(0);
+    let count = lights.iter().flat_map(|(_, c, _)| c.cascades.values().map(Vec::len)).max().unwrap_or(0);
+    since.resize(count, 0);
     // A new map size makes new maps: nothing to keep.
     let same_maps = !map.is_some_and(|m| m.is_changed());
     let mut mask = held_mask(schedule, *frame, count);
-    if mask != 0 && !(same_maps && same_layout(&kept, &lights.iter().collect::<Vec<_>>())) {
+    if mask != 0 && !(same_maps && same_layout(&kept, &lights.iter().map(|(e, c, _)| (e, c)).collect::<Vec<_>>())) {
         mask = 0;
+    }
+    if mask != 0 {
+        // The cascades whose grid is the one the frame that drew them had, in every light and
+        // view, and the ones the fog hides. Only with maps kept already: with no kept cascade
+        // nothing can stand in.
+        let mut same = u32::MAX;
+        let mut seen = 0u32;
+        for (light, cascades) in lights.iter() {
+            let Some(k) = kept.get(&light) else { continue };
+            for (view, list) in cascades.cascades.iter() {
+                let Some(kl) = k.cascades.get(view) else { continue };
+                for (i, (c, kc)) in list.iter().zip(kl.iter()).enumerate().take(32) {
+                    seen |= 1 << i;
+                    if unchanged(c, kc) {
+                        same |= 1 << i;
+                    } else {
+                        same &= !(1 << i);
+                    }
+                }
+            }
+        }
+        let fogged = match (sky.as_deref(), lights.iter().find_map(|(_, c, config)| config.filter(|config| config.bounds.len() == count).map(|config| (config, c)))) {
+            (Some(sky), Some((config, _))) => fog_hidden(sky, config, count),
+            _ => 0,
+        };
+        for i in 1..count.min(32) {
+            if (same & seen & (1 << i) != 0 || fogged & (1 << i) != 0) && since[i] < UNCHANGED_HOLD_FRAMES {
+                mask |= 1 << i;
+            }
+        }
+        // The budget: the nearest cascades drawn first, the farthest held over to the next
+        // frame, which then draws them with the maps this frame's schedules would have --
+        // but never one that has waited [`UNCHANGED_HOLD_FRAMES`], so every cascade is drawn
+        // at least that often whatever the budget.
+        if budget.passes > 0 {
+            let mut drawn: Vec<usize> = (0..count.min(32)).filter(|i| mask & (1 << i) == 0).collect();
+            while drawn.len() > budget.passes {
+                let Some(at) = drawn.iter().rposition(|&i| since[i] < UNCHANGED_HOLD_FRAMES) else { break };
+                let i = drawn.remove(at);
+                mask |= 1 << i;
+            }
+        }
     }
     if mask == 0 {
         kept.clear();
         if !schedule.is_empty() {
-            kept.extend(lights.iter().map(|(e, c)| (e, c.clone())));
+            kept.extend(lights.iter().map(|(e, c, _)| (e, c.clone())));
         }
     } else {
-        for (light, mut cascades) in &mut lights {
+        for (light, mut cascades, _) in &mut lights {
             let Some(k) = kept.get_mut(&light) else { continue };
             for (view, list) in cascades.cascades.iter_mut() {
                 let Some(kl) = k.cascades.get_mut(view) else { continue };
@@ -254,6 +378,14 @@ fn hold_cascades(
                     }
                 }
             }
+        }
+    }
+    // How long each cascade has gone without being drawn ([`UNCHANGED_HOLD_FRAMES`]).
+    for (i, drawn) in since.iter_mut().enumerate() {
+        if mask & (1 << i) != 0 {
+            *drawn = drawn.saturating_add(1);
+        } else {
+            *drawn = 0;
         }
     }
     // Once for each schedule that comes into use (the switch on, or the staggered one with
@@ -274,14 +406,17 @@ fn hold_cascades(
 }
 
 /// `performance`: start in Performance mode (`--sun-shadows=performance`; the program sets
-/// `SkyState`'s cascade count to match).
+/// `SkyState`'s cascade count to match). `budget` is the shadow budget
+/// (`--shadow-budget=<casters>,<passes>`, [`ShadowBudget`]).
 pub struct ShadowRatePlugin {
     pub performance: bool,
+    pub budget: ShadowBudget,
 }
 
 impl Plugin for ShadowRatePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PerformanceShadows(self.performance))
+            .insert_resource(self.budget)
             .insert_resource(CascadesBeforePerformance(self.performance.then_some(crate::sky::DEFAULT_SHADOW_CASCADES)))
             .init_resource::<HoldDirectionalShadowMaps>()
             .add_plugins(ExtractResourcePlugin::<HoldDirectionalShadowMaps>::default())
@@ -296,7 +431,6 @@ impl Plugin for ShadowRatePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::light::cascade::Cascade;
 
     fn cascades(view: Entity, n: usize) -> Cascades {
         let mut c = Cascades::default();
@@ -341,9 +475,12 @@ mod tests {
 
     #[test]
     fn the_schedules_hold_the_cascades_they_should() {
-        // Performance: both cascades every other frame, together.
-        let performance: Vec<u32> = (0..4).map(|f| held_mask(&PERFORMANCE_SCHEDULE, f, 2)).collect();
-        assert_eq!(performance, [0, 0b11, 0, 0b11]);
+        // Performance: the nearest every other frame, the far one every fourth, on other
+        // frames still: never two cascades in a frame, and three of four frames draw one.
+        let performance: Vec<u32> = (0..8).map(|f| held_mask(&PERFORMANCE_SCHEDULE, f, 2)).collect();
+        assert_eq!(performance, [0b10, 0b11, 0b10, 0b01, 0b10, 0b11, 0b10, 0b01]);
+        let drawn: Vec<u32> = performance.iter().map(|held| 2 - held.count_ones()).collect();
+        assert_eq!(drawn, [1, 0, 1, 1, 1, 0, 1, 1], "0.75 maps a frame, never two");
         // Staggered: the nearest every frame, the middle every other, the farthest every
         // fourth, never both of the far two drawn in one frame.
         let staggered: Vec<u32> = (0..4).map(|f| held_mask(&STAGGERED_SCHEDULE, f, 3)).collect();
@@ -351,6 +488,44 @@ mod tests {
         // More cascades than the schedule: those are drawn every frame.
         assert_eq!(held_mask(&PERFORMANCE_SCHEDULE, 1, 3), 0b011);
         assert_eq!(held_mask(&[], 1, 3), 0);
+    }
+
+    /// A cascade whose grid did not move redraws the same depth: it is held, but not for
+    /// ever (a caster may move while the view does not).
+    #[test]
+    fn a_grid_that_did_not_move_is_held() {
+        let kept = Cascade { world_from_cascade: Mat4::IDENTITY, clip_from_cascade: Mat4::IDENTITY, clip_from_world: Mat4::IDENTITY, texel_size: 9.4 };
+        assert!(unchanged(&kept, &kept.clone()));
+        let mut moved = kept.clone();
+        moved.clip_from_world.w_axis.x += moved.texel_size;
+        assert!(!unchanged(&moved, &kept), "a grid a texel over is another map");
+        assert!(UNCHANGED_HOLD_FRAMES >= 2, "a caster that moves is drawn again");
+    }
+
+    #[test]
+    fn the_budget_has_no_caps_by_default_and_parses_its_text() {
+        assert_eq!(ShadowBudget::default(), ShadowBudget { casters: 0, passes: 0 });
+        assert_eq!(ShadowBudget::parse("1200,1"), ShadowBudget { casters: 1200, passes: 1 });
+        assert_eq!(ShadowBudget::parse("800"), ShadowBudget { casters: 800, passes: 0 });
+        assert_eq!(ShadowBudget::parse(""), ShadowBudget::default());
+        assert_eq!(ShadowBudget::parse("x,y"), ShadowBudget::default());
+    }
+
+    #[test]
+    fn fog_that_is_opaque_at_a_cascades_near_bound_hides_it() {
+        let mut sky = SkyState::default();
+        // Fog 0..500: everything from 500 out is fog colour.
+        sky.fog_override = Some((0.0, 500.0));
+        // Bounds 667, 2,309, 8,000 with a fifth of overlap: the second cascade starts at
+        // 533 and the third at 1,847, both past the fog's end; the first starts at 5.
+        let config = crate::sky::shadow_cascades(8000.0, 1.0, 3);
+        assert_eq!(fog_hidden(&sky, &config, 3), 0b110);
+        // Fog far away: nothing is hidden.
+        sky.fog_override = Some((0.0, 80_000.0));
+        assert_eq!(fog_hidden(&sky, &config, 3), 0);
+        // No fog at all.
+        sky.fog_override = None;
+        assert_eq!(fog_hidden(&sky, &config, 3), 0);
     }
 
     #[test]
