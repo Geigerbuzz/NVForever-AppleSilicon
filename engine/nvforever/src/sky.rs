@@ -14,7 +14,10 @@
 //!   colours) go on the four shapes in file order [hypothesis: layer 0 is the top dome,
 //!   which the night weather fills with a starfield; layer 3 the low dome, which the
 //!   clear day weather fills with `NVCloudlight.dds`]. By day they take on part of the
-//!   sunlight's hue (`SkyState::cloud_tint`) [hypothesis, fitted].
+//!   sunlight's hue (`SkyState::cloud_tint`) [hypothesis, fitted]. `--cloud-upgrade` draws
+//!   them denser and softer from the same textures: an alpha lift, a second offset draw of
+//!   each layer and a fog blend at the horizon (`CloudUpgrade`, `SkyUpgrade`; off by
+//!   default, and absent from the picture when off).
 //! - The sun: the climate's sun texture and glare texture spread over angular squares
 //!   around the sun, coloured by the weather's "sun" colour and drawn into the dome (the
 //!   disc, behind the clouds) and the clouds (the glare) by sky.wesl [hypothesis, fitted].
@@ -173,6 +176,9 @@ pub struct SkyDisplay {
     #[texture(103)]
     #[sampler(104)]
     pub glare_texture: Option<Handle<Image>>,
+    /// The cloud upgrade's density and fog blend (`--cloud-upgrade`; zeros: off).
+    #[uniform(105)]
+    pub upgrade: SkyUpgrade,
 }
 
 /// Daylight on the sky (sky.wesl). By day the original game's sky and clouds are darker
@@ -1247,6 +1253,9 @@ pub struct SkyDome(Vec<[f32; 2]>);
 pub struct CloudLayer {
     layer: usize,
     set: usize,
+    /// 0: the layer as the weather draws it; 1: the cloud upgrade's second draw, at
+    /// another scale and offset ([`UPGRADE_SECOND_SCALE`], [`UPGRADE_SECOND_OFFSET`]).
+    copy: usize,
     /// Form ID of the weather whose texture this layer shows.
     shows: Option<u32>,
 }
@@ -1305,6 +1314,53 @@ const STAR_STRENGTH: f32 = 0.25;
 /// The climate's star model.
 #[derive(Component)]
 pub struct Stars;
+
+/// `--cloud-upgrade` (off by default): denser, softer cloud layers from the game's own
+/// cloud textures (sky.rs "Cloud upgrade"). The layers' alpha is lifted by
+/// [`UPGRADE_DENSITY`], a second draw of each layer at [`UPGRADE_SECOND_SCALE`] and
+/// [`UPGRADE_SECOND_OFFSET`] fills their gaps, and their bases blend into the weather's fog
+/// near the horizon. No new art and no change to the textures.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct CloudUpgrade(pub bool);
+
+/// The cloud upgrade's density exponent: a' = 1 - (1 - a)^1.55 (a mean texture alpha of
+/// 0.23 becomes 0.34) [engineering choice, by eye].
+pub const UPGRADE_DENSITY: f32 = 1.55;
+/// The share of the weather's fog colour a cloud layer's base takes at the horizon
+/// [engineering choice, by eye].
+pub const UPGRADE_FOG: f32 = 0.35;
+/// The upgrade's second draw of each cloud layer: its texture scale (repeats across the
+/// dome), its offset (repeats), its alpha against the first draw's, and its depth bias
+/// past that draw (the sky's bands are one apart, so a part sits between two).
+/// [engineering choice, by eye]
+pub const UPGRADE_SECOND_SCALE: f32 = 1.7;
+pub const UPGRADE_SECOND_OFFSET: Vec2 = Vec2::new(0.37, 0.11);
+pub const UPGRADE_SECOND_ALPHA: f32 = 0.65;
+pub const UPGRADE_SECOND_BIAS: f32 = 0.75;
+
+/// The cloud upgrade's uniform (sky.wesl binding 105): zeros when off, so the shader's
+/// branch is not taken and the picture is as before.
+#[derive(Clone, Copy, Debug, Default, ShaderType, Reflect)]
+pub struct SkyUpgrade {
+    /// x: 1 with the upgrade, 0 without; y: the density exponent; z: the fog share at the
+    /// horizon; w unused.
+    pub params: Vec4,
+    /// rgb: the weather's fog colour at the horizon (linear); w unused.
+    pub fog: Vec4,
+}
+
+impl SkyUpgrade {
+    /// The upgrade's values now, or zeros when it is off.
+    pub fn new(on: bool, fog: [f32; 3]) -> SkyUpgrade {
+        if !on {
+            return SkyUpgrade::default();
+        }
+        SkyUpgrade {
+            params: Vec4::new(1.0, UPGRADE_DENSITY, UPGRADE_FOG, 0.0),
+            fog: Vec4::new(fog[0], fog[1], fog[2], 0.0),
+        }
+    }
+}
 
 /// The moon disc with one texture per phase (MOON_PHASES order).
 #[derive(Component)]
@@ -1419,6 +1475,7 @@ pub fn setup_sky(
     mut textures: ResMut<TextureCache>,
     data: Res<GameData>,
     sky: Res<SkyState>,
+    upgrade: Option<Res<CloudUpgrade>>,
 ) {
     let sun_tex = sky.climate.sun_texture.as_deref().and_then(|t| textures.get(t, true, &data, &mut images, None));
     let glare_tex = sky.climate.sun_glare_texture.as_deref().and_then(|t| textures.get(t, true, &data, &mut images, None));
@@ -1450,24 +1507,33 @@ pub fn setup_sky(
         // Vertex alpha fades the layer out; the colour comes from the weather.
         let colors: Vec<[f32; 4]> = shape.colors.iter().map(|c| [1.0, 1.0, 1.0, c[3]]).collect();
         let mesh = meshes.add(sky_mesh(shape, colors));
+        // The cloud upgrade adds a second, offset draw of each layer, just past the layer's
+        // own (sky.rs CloudUpgrade).
+        let copies = if upgrade.as_deref().is_some_and(|u| u.0) { 2 } else { 1 };
         for set in 0..2 {
-            commands.spawn((
-                Name::new(format!("Cloud layer {layer}.{set}")),
-                CloudLayer { layer, set, shows: None },
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(materials.add({
-                    let mut m = sky_material(
-                        StandardMaterial { alpha_mode: AlphaMode::Blend, depth_bias: SKY_SORT_BIAS + (2 * layer + set) as f32, ..default() },
-                        1.0,
-                    );
-                    m.extension.glare_texture = glare_tex.clone();
-                    m
-                })),
-                sky_transform(Vec3::ZERO),
-                Visibility::Hidden,
-                NotShadowCaster,
-                NotShadowReceiver,
-            ));
+            for copy in 0..copies {
+                let bias = SKY_SORT_BIAS + (2 * layer + set) as f32 + if copy == 0 { 0.0 } else { UPGRADE_SECOND_BIAS };
+                let name = if copy == 0 { format!("Cloud layer {layer}.{set}") } else { format!("Cloud layer {layer}.{set}.b") };
+                commands.spawn((
+                    Name::new(name),
+                    CloudLayer { layer, set, copy, shows: None },
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(materials.add({
+                        let mut m = sky_material(StandardMaterial { alpha_mode: AlphaMode::Blend, depth_bias: bias, ..default() }, 1.0);
+                        m.extension.glare_texture = glare_tex.clone();
+                        // The second draw does not add the sun's glare a second time: the
+                        // layer's own draw already does (sky.wesl params.w).
+                        if copy != 0 {
+                            m.extension.light.params.w = 0.0;
+                        }
+                        m
+                    })),
+                    sky_transform(Vec3::ZERO),
+                    Visibility::Hidden,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                ));
+            }
         }
     }
     // Stars: inside the atmosphere dome, drawn before the moon, sun and clouds.
@@ -1715,6 +1781,7 @@ pub fn update_clouds(
     mut textures: ResMut<TextureCache>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<SkyMaterial>>,
+    upgrade: Option<Res<CloudUpgrade>>,
     cam: Query<&Transform, (With<FlyCam>, Without<CloudLayer>)>,
     mut clouds: Query<(&mut CloudLayer, &MeshMaterial3d<SkyMaterial>, &mut Transform, &mut Visibility), Without<FlyCam>>,
     mut logged: Local<Option<u32>>,
@@ -1738,10 +1805,24 @@ pub fn update_clouds(
         };
         let new_texture = cl.shows != Some(w.form_id);
         let c = sky.cloud_tint(w.cloud_color(&sky.climate, cl.layer, sky.hour));
+        // The upgrade's second draw is fainter than the layer's own ([`UPGRADE_SECOND_ALPHA`]).
+        let alpha = if cl.copy == 0 { alpha } else { alpha * UPGRADE_SECOND_ALPHA };
         let color = LinearRgba::new(c[0], c[1], c[2], alpha);
         // Each set scrolls at its own weather's ONAM speeds, so a fade blends the two
         // weathers' layers each moving at its own rate (fnv_world::sky::Weather::cloud_scroll).
         let offset = w.cloud_offset(cl.layer, secs);
+        // The upgrade draws each layer a second time at another scale and offset: the same
+        // texture, still, so its gaps fill and its edges soften.
+        let transform = if cl.copy == 0 {
+            Affine2::from_translation(Vec2::new(offset, 0.0))
+        } else {
+            Affine2::from_scale_angle_translation(
+                Vec2::splat(UPGRADE_SECOND_SCALE),
+                0.0,
+                Vec2::new(offset + UPGRADE_SECOND_OFFSET.x, UPGRADE_SECOND_OFFSET.y),
+            )
+        };
+        let upgrade_now = SkyUpgrade::new(upgrade.as_deref().is_some_and(|u| u.0), sky.fog_color());
         // The material is written only when it shows differently: a new texture, a colour
         // moved by more than a thousandth, or a scroll of more than 1/2048 of the texture
         // (under a texel; the scroll is a few thousandths of a repeat a second). Written
@@ -1749,9 +1830,12 @@ pub fn update_clouds(
         // GPU memory made and freed behind the night stalls (#897).
         let Some(was) = materials.get(&m.0) else { continue };
         let old = was.base.base_color.to_linear();
-        let moved = (was.base.uv_transform.translation.x - offset).rem_euclid(1.0);
+        let moved = (was.base.uv_transform.translation.x - transform.translation.x).rem_euclid(1.0);
         let unchanged = !new_texture
+            && was.base.uv_transform.matrix2.abs_diff_eq(transform.matrix2, 1e-6)
             && [old.red - color.red, old.green - color.green, old.blue - color.blue, old.alpha - color.alpha].iter().all(|d| d.abs() <= 1e-3)
+            && was.extension.upgrade.params.abs_diff_eq(upgrade_now.params, 1e-3)
+            && was.extension.upgrade.fog.abs_diff_eq(upgrade_now.fog, 1e-3)
             && moved.min(1.0 - moved) <= 1.0 / 2048.0;
         let mut textured = was.base.base_color_texture.is_some();
         if !unchanged {
@@ -1770,7 +1854,8 @@ pub fn update_clouds(
                 cl.shows = Some(w.form_id);
             }
             mat.base.base_color = Color::LinearRgba(color);
-            mat.base.uv_transform = Affine2::from_translation(Vec2::new(offset, 0.0));
+            mat.base.uv_transform = transform;
+            mat.extension.upgrade = upgrade_now;
             textured = mat.base.base_color_texture.is_some();
         }
         *vis = if textured && alpha > 0.0 { Visibility::Inherited } else { Visibility::Hidden };
