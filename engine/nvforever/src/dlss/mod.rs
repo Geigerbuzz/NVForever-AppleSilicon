@@ -1021,13 +1021,35 @@ pub(crate) fn dlss_pass(
 /// defaults, with `WgpuSettings::adapter_name` set to the checked NVIDIA GPU when the loader
 /// pinned one. Without a pin it is `RenderPlugin::default()`. `main` sets it on
 /// `DefaultPlugins`, after [`DlssInitPlugin`] has run.
+///
+/// On Apple the device is also asked for without `TEXTURE_BINDING_ARRAY` and
+/// `BUFFER_BINDING_ARRAY`: wgpu refuses a bind group holding both a binding array and a
+/// uniform buffer (wgpu-core `validate_binding_arrays`), and a material extension's own
+/// uniform shares the material's group with `StandardMaterial`'s bindless arrays — which is
+/// exactly `NifSurface` (nvf-assets `nif_material.rs`, "Bindless"). Without the features
+/// Bevy binds the plain way throughout: that extension's uniform at binding 50 and its
+/// textures at 51 to 53, the path those shaders already have. `disabled_features` is the
+/// switch that works: Bevy's default `WgpuSettingsPriority::Functionality` enables every
+/// feature the adapter has, and `features` is only OR-ed in on top.
 pub fn render_plugin() -> bevy::render::RenderPlugin {
     let adapter_name = adapter_pin();
+    #[cfg(target_vendor = "apple")]
+    let disabled_features = {
+        use bevy::render::settings::WgpuFeatures;
+        Some(WgpuFeatures::TEXTURE_BINDING_ARRAY | WgpuFeatures::BUFFER_BINDING_ARRAY)
+    };
     if adapter_name.is_none() {
+        #[cfg(not(target_vendor = "apple"))]
         return bevy::render::RenderPlugin::default();
     }
     bevy::render::RenderPlugin {
-        render_creation: bevy::render::settings::WgpuSettings { adapter_name, ..default() }.into(),
+        render_creation: bevy::render::settings::WgpuSettings {
+            adapter_name,
+            #[cfg(target_vendor = "apple")]
+            disabled_features,
+            ..default()
+        }
+        .into(),
         ..default()
     }
 }

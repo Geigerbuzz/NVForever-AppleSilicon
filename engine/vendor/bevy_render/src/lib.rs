@@ -546,7 +546,7 @@ fn insert_future_resources(render_creation: &RenderCreation, main_world: &mut Wo
         .ok()
         .cloned();
 
-    #[cfg(feature = "raw_vulkan_init")]
+    #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
     let raw_vulkan_init_settings = main_world
         .get_resource::<renderer::raw_vulkan_init::RawVulkanInitSettings>()
         .cloned()
@@ -556,7 +556,7 @@ fn insert_future_resources(render_creation: &RenderCreation, main_world: &mut Wo
     let success = render_creation.create_render(
         future_resources.clone(),
         primary_window,
-        #[cfg(feature = "raw_vulkan_init")]
+        #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
         raw_vulkan_init_settings,
     );
     if success {
