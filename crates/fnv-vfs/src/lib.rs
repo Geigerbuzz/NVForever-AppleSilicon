@@ -347,7 +347,27 @@ impl Vfs {
         if let Some(root) = mods {
             // An absent optional layer is ordinary; other errors retain walk's diagnostics.
             if !matches!(root.try_exists(), Ok(false)) {
-                vfs.index_loose(root);
+                // The mods folder holds ONE FOLDER PER MOD, and each of those is an overlay
+                // root: a mod's `textures/` is the game's `textures/`, not
+                // `mods/<Mod Name>/textures/`. Indexing the mods folder itself put every
+                // file behind its own mod's folder name, where no asset path looks, so mod
+                // *records* loaded (the plugin is found by name) while mod *assets* were
+                // never seen: a Pip-Boy icon pack installed at exactly the right path still
+                // resolved to the vanilla archive entry, and every texture mod measured 0%.
+                // Later folders win over earlier ones (name order), as a load order's later
+                // mod does. A file lying directly in the mods folder is not an asset.
+                let mut payloads: Vec<PathBuf> = std::fs::read_dir(root)
+                    .map(|rd| {
+                        rd.flatten()
+                            .map(|e| e.path())
+                            .filter(|p| p.is_dir())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                payloads.sort();
+                for payload in &payloads {
+                    vfs.index_loose(payload);
+                }
             }
         }
         Ok(vfs)
