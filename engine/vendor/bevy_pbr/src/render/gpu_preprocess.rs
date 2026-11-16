@@ -28,7 +28,7 @@ use bevy_ecs::{
     query::{Has, Or, With, Without},
     resource::Resource,
     schedule::{common_conditions::any_match_filter, IntoScheduleConfigs as _},
-    system::{Commands, Query, Res, ResMut, SystemParam},
+    system::{Commands, Query, Res, ResMut},
     world::{FromWorld, World},
 };
 use bevy_log::warn_once;
@@ -2435,7 +2435,7 @@ pub fn prepare_preprocess_bind_groups(
     // Now, if there were any indirect draw commands, create the bind groups for
     // the indirect parameters building shader.
     if any_indirect {
-        create_caches.build_indirect_parameters(
+        create_build_indirect_parameters_bind_groups(
             &mut caches.build_indirect_parameters,
             &render_device,
             &pipeline_cache,
@@ -2449,7 +2449,7 @@ pub fn prepare_preprocess_bind_groups(
     // Create the bind groups we'll need for each dispatch of the bin unpacking
     // (`unpack_bins`) and uniform allocation (`allocate_uniforms`) shaders.
     for (_, view) in &views {
-        create_caches.bin_unpacking(
+        create_bin_unpacking_bind_groups(
             &mut caches.bin_unpacking,
             &render_device,
             &pipeline_cache,
@@ -2459,7 +2459,7 @@ pub fn prepare_preprocess_bind_groups(
             &scene_unpacking_buffers,
             &view.retained_view_entity,
         );
-        create_caches.uniform_allocation(
+        create_uniform_allocation_bind_groups(
             &mut caches.uniform_allocation,
             &render_device,
             &pipeline_cache,
@@ -3543,7 +3543,7 @@ fn create_build_indirect_parameters_bind_groups(
     // `build_indirect_parameters_key`'s emptiness note above).
     build_indirect_parameters_bind_groups.retain(|phase_type_id, _| {
         indirect_parameters_buffers
-            .get(*phase_type_id)
+            .get(phase_type_id)
             .is_some_and(|buffers| {
                 buffers
                     .indexed
