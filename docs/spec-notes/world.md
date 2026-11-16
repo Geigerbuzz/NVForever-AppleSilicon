@@ -1439,7 +1439,12 @@ Textures2.bsa`, `Fallout - Misc.bsa`, DLC archives]:
   display values" below), with no inverse square [hypothesis: the falloff exponent, 1
   for most lights, is not used]. With Bevy's physically based inverse-square falloff instead, the
   porch lamp lit a small hot spot and left the door and wall dark, where in game they are
-  lit warm [observed, owner's screenshots].
+  lit warm [observed, owner's screenshots]. A spot light whose LIGH sets Spot Shadow casts
+  one only with `--spot-shadows <n>`, the nearest n to the camera, 0 (the default) casting
+  none (lights.rs `choose_spot_shadows`). **No LIGH of the ten masters sets Spot Light or
+  Spot Shadow** [observed 2026-11-16: `fnvtool esm fields` over the ten, 731 LIGH records
+  in the five that hold any; flags only Dynamic 4, flicker 93/22, pulse 14/14], so the flag
+  waits for a mod or a test plugin.
 - **Lamp strength against the original** (2026-10-23, Dead Money's wall lantern; frames
   private in `C:\fnv-private\references\fx_audit\game\dm_lamp_*.png`). Light
   `NVDLC01ExtSconceKeyWT` (radius 200, (224, 255, 117), fade 2.5) stands 91 units in front

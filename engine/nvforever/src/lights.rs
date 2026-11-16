@@ -7,6 +7,7 @@
 //! in `bevy_pbr::lighting`) with the game's, and [`spawn_light`] sets intensities in
 //! display units.
 
+use bevy::camera::visibility::ViewVisibility;
 use bevy::prelude::*;
 use bevy::shader::Shader;
 use fnv_world::lighting::{light_data, light_flags, placed_light_radius, ref_xrds};
@@ -14,6 +15,7 @@ use fnv_world::placed::Placement;
 use nvf_play::RefVisual;
 use std::f32::consts::PI;
 
+use crate::fly::WorldCamera;
 use crate::world::WorldData;
 
 /// The embedded asset path under which bevy_pbr registers `bevy_pbr::lighting`.
@@ -211,10 +213,54 @@ pub fn unix_lines(source: &str) -> String {
     source.replace("\r\n", "\n")
 }
 
-pub struct LightsPlugin;
+/// A placed spot light whose LIGH sets `Spot Shadow`: it may cast a shadow when
+/// `--spot-shadows` gives it one of the [`SpotShadowBudget`] slots
+/// ([`choose_spot_shadows`]). Without that flag it is inert, as every placed light was.
+#[derive(Component)]
+pub struct SpotShadowCandidate;
+
+/// How many authored spot lights may cast a shadow at once (`--spot-shadows <n>`); 0,
+/// the default, leaves every placed light shadowless as before. The flashlight's own
+/// shadow (`flashlight.rs`) is separate and always on, as it was.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpotShadowBudget(pub usize);
+
+/// The most `--spot-shadows` will use: each is a 2048² render pass and texture layer
+/// (graphics.rs `SHADOW_MAP`), so a typo must not make a hundred of them.
+const MAX_SPOT_SHADOWS: usize = 8;
+
+/// The shadow map's near plane, game units: as the flashlight's (`flashlight.rs` `NEAR`).
+/// Bevy's default 0.1 spends the map's depth precision over a light's hundreds of units.
+const SPOT_SHADOW_NEAR: f32 = 8.0;
+
+/// A light that casts now counts as if it were this much closer when the slots are
+/// chosen (`nearest_casters`), so two lights at about the same distance do not trade the
+/// slot every frame and rebuild its shadow view.
+const CASTER_KEEP: f32 = 0.81;
+
+/// The nearest `cap` of `(distance², casting now)`, by index (`choose_spot_shadows`).
+fn nearest_casters(distances: &[(f32, bool)], cap: usize) -> Vec<usize> {
+    let mut ranked: Vec<(f32, usize)> =
+        distances.iter().enumerate().map(|(i, &(d2, casting))| (d2 * if casting { CASTER_KEEP } else { 1.0 }, i)).collect();
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    ranked.into_iter().take(cap).map(|(_, i)| i).collect()
+}
+
+pub struct LightsPlugin {
+    /// `--spot-shadows`: how many authored spot lights may cast at once (0: none).
+    pub spot_shadows: usize,
+}
 
 impl Plugin for LightsPlugin {
     fn build(&self, app: &mut App) {
+        let spot_shadows = self.spot_shadows.min(MAX_SPOT_SHADOWS);
+        if spot_shadows < self.spot_shadows {
+            warn!("lights: --spot-shadows {} is over the limit of {MAX_SPOT_SHADOWS}; using {MAX_SPOT_SHADOWS}", self.spot_shadows);
+        }
+        app.insert_resource(SpotShadowBudget(spot_shadows));
+        if spot_shadows > 0 {
+            app.add_systems(Update, choose_spot_shadows);
+        }
         let handle: Handle<Shader> = app.world().resource::<AssetServer>().load(PBR_LIGHTING);
         let functions: Handle<Shader> = app.world().resource::<AssetServer>().load(PBR_FUNCTIONS);
         let tonemapping: Handle<Shader> = app.world().resource::<AssetServer>().load(TONEMAPPING_SHARED);
@@ -360,6 +406,60 @@ pub struct MovingLight {
     pub motion: LightMotion,
     pub full: f32,
     pub seed: f32,
+}
+
+/// Give the nearest [`SpotShadowBudget`] authored spot lights (`SpotShadowCandidate`) a
+/// shadow map, and take it from the rest. Nearest to the main camera first; a light that
+/// is out ([`ViewVisibility`]: a script disabled it, or its cell is unloading) gives its
+/// slot up. Runs only when `--spot-shadows` is above 0, so the default frame does not even
+/// query the lights.
+fn choose_spot_shadows(
+    budget: Res<SpotShadowBudget>,
+    cams: Query<&GlobalTransform, WorldCamera>,
+    mut lights: Query<(Entity, &GlobalTransform, &ViewVisibility, &mut SpotLight, Option<&RefVisual>), With<SpotShadowCandidate>>,
+    mut said: Local<Option<Vec<u32>>>,
+) {
+    let Ok(cam) = cams.single() else { return };
+    let at = cam.translation();
+    let mut candidates = Vec::new();
+    for (e, t, visible, mut spot, reference) in &mut lights {
+        if !visible.get() {
+            // A hidden light must not keep a slot for when it comes back.
+            if spot.shadow_maps_enabled {
+                spot.shadow_maps_enabled = false;
+            }
+            continue;
+        }
+        candidates.push((e, t.translation().distance_squared(at), spot.shadow_maps_enabled, reference.map(|v| v.0)));
+    }
+    let distances: Vec<(f32, bool)> = candidates.iter().map(|c| (c.1, c.2)).collect();
+    let chosen = nearest_casters(&distances, budget.0);
+    let mut casting = vec![false; candidates.len()];
+    for &i in &chosen {
+        casting[i] = true;
+    }
+    for (i, c) in candidates.iter().enumerate() {
+        if let Ok((_, _, _, mut spot, _)) = lights.get_mut(c.0) {
+            if spot.shadow_maps_enabled != casting[i] {
+                spot.shadow_maps_enabled = casting[i];
+            }
+        }
+    }
+    let mut now: Vec<u32> = chosen.iter().filter_map(|&i| candidates[i].3).collect();
+    now.sort_unstable();
+    // Once for each selection, as the sun's shadow modes say theirs: this is the line a
+    // run with the flag shows.
+    if *said != Some(now.clone()) {
+        if !candidates.is_empty() {
+            if now.is_empty() {
+                info!("spot shadows: none of {} authored spot lights cast (budget {})", candidates.len(), budget.0);
+            } else {
+                let ids: Vec<String> = now.iter().map(|r| format!("0x{r:08X}")).collect();
+                info!("spot shadows: {} of {} authored spot lights cast (budget {}): {}", now.len(), candidates.len(), budget.0, ids.join(", "));
+            }
+        }
+        *said = Some(now);
+    }
 }
 
 /// Flicker and pulse the lights that do so.
@@ -599,17 +699,22 @@ pub fn spawn_light(
     let t = Transform::from_translation(at);
     // Lights out of step with each other: a phase from the reference.
     let moving = LightMotion::of(l.flags).map(|motion| MovingLight { motion, full: intensity, seed: (placed.form_id.wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0 });
-    // Neither kind casts shadows. If one ever does, give it the sun's render layers
-    // (`sky::SHADOW_LAYER`, `sky::BODY_LAYER`), or the player's body casts none from it.
+    // Only a spot light whose record asks for a shadow (Spot Shadow) may cast one, and
+    // only while `--spot-shadows` gives it a slot (choose_spot_shadows); the default
+    // leaves every placed light shadowless, as before. Its casters are the world's layer
+    // 0, as the flashlight's are: the player's body casts none from it.
     if l.flags & light_flags::SPOT != 0 {
         let a = (l.fov.clamp(1.0, 179.0) / 2.0).to_radians();
         // Spot lights point down their reference's -z [hypothesis].
         let mut e = commands.spawn((
-            SpotLight { color, intensity, range: radius, outer_angle: a, inner_angle: a * 0.8, shadow_maps_enabled: false, ..default() },
+            SpotLight { color, intensity, range: radius, outer_angle: a, inner_angle: a * 0.8, shadow_maps_enabled: false, shadow_map_near_z: SPOT_SHADOW_NEAR, ..default() },
             t.looking_to(-Vec3::Z, Vec3::Y),
             RefVisual(placed.form_id),
             ChildOf(cell_e),
         ));
+        if l.flags & light_flags::SPOT_SHADOW != 0 {
+            e.insert(SpotShadowCandidate);
+        }
         if let Some(d) = driven {
             e.insert(d);
         }
@@ -702,6 +807,21 @@ mod tests {
         assert!((b - 2.2).abs() < 1e-5);
     }
 
+    #[test]
+    fn the_nearest_spot_shadows_take_the_slots() {
+        // No budget, no shadows (the default).
+        assert!(nearest_casters(&[(1.0, false)], 0).is_empty());
+        // Distance squared: the nearest two of four.
+        let four = [(16.0, false), (1.0, false), (9.0, false), (4.0, false)];
+        assert_eq!(nearest_casters(&four, 2), [1, 3]);
+        // Fewer candidates than slots: all of them.
+        assert_eq!(nearest_casters(&four, 9), [1, 3, 2, 0]);
+        // A light that casts keeps its slot from one only a little nearer (0.81 × d² is
+        // a 10 % closer distance); a clearly nearer one takes it.
+        assert_eq!(nearest_casters(&[(4.0, true), (4.0, false)], 1), [0]);
+        assert_eq!(nearest_casters(&[(5.0, true), (4.0, false)], 1), [1]);
+    }
+
     // A placed light's source and the reference's enabled state (#1619), on a synthetic
     // plugin decoded through the repository schemas, as `crates/fnv-sim/tests/synthetic.rs`.
     mod follows_its_reference {
@@ -761,7 +881,7 @@ mod tests {
 
         fn plugin_bytes() -> Vec<u8> {
             let tes4 = record(b"TES4", 1, 0, &[sub(b"HEDR", cat(&[&1.34f32.to_le_bytes(), &0i32.to_le_bytes(), &0x800u32.to_le_bytes()]))]);
-            let lights = group(*b"LIGH", 0, &cat(&[&ligh(POINT, 0), &ligh(SPOT, light_flags::SPOT)]));
+            let lights = group(*b"LIGH", 0, &cat(&[&ligh(POINT, 0), &ligh(SPOT, light_flags::SPOT | light_flags::SPOT_SHADOW)]));
             let cell = record(b"CELL", 0, CELL, &[sub(b"EDID", b"TestCell\0".to_vec())]);
             let refs = cat(&[
                 &refr(POINT_REF, 0, POINT, None),
@@ -857,6 +977,10 @@ mod tests {
                 let cell = cell(&mut app);
                 let source = spawn(&mut app, cell, r);
                 assert_eq!(app.world().get::<SpotLight>(source).is_some(), r == SPOT_REF);
+                // The record's Spot Shadow flag marks it for --spot-shadows; the source
+                // still casts nothing on its own.
+                assert_eq!(app.world().get::<SpotShadowCandidate>(source).is_some(), r == SPOT_REF);
+                assert!(!app.world().get::<SpotLight>(source).is_some_and(|s| s.shadow_maps_enabled));
                 app.update();
                 assert!(shines(&app, source), "{r:X} is on at the start");
                 set_enabled(&mut app, r, false, &[r]);

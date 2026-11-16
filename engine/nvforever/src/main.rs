@@ -370,6 +370,12 @@ struct Args {
     /// shadow_thin.rs); 0, the default, lets everything cast as far as the shadows reach.
     #[arg(long, default_value_t = shadow_thin::DEFAULT_RATIO)]
     shadow_thin: f32,
+    /// Test aid: let the nearest N placed spot lights whose LIGH sets `Spot Shadow` cast
+    /// a shadow (lights.rs `choose_spot_shadows`); 0, the default, casts none. Each is a
+    /// 2048² pass over the casters in its cone. No LIGH of the ten masters sets the flag
+    /// (docs/spec-notes/world.md §8), so this waits for a mod or a test plugin.
+    #[arg(long, default_value_t = 0)]
+    spot_shadows: usize,
     /// Samples per pixel for anti-aliasing: 1 (off), 2, 4 or 8. The cut-out edges of
     /// alpha-tested shapes (plants, fences, hair, grass) are smoothed with it too, like
     /// the game's transparency multisampling; with 1 they are tested per pixel.
@@ -1522,7 +1528,7 @@ fn main() -> AppExit {
     )
     .add_plugins((window_icon::WindowIconPlugin, window_mode::WindowModePlugin))
     .add_plugins(nvf_play::audio_out::AudioOutPlugin)
-    .add_plugins((ArchivePlugin(game), lights::LightsPlugin, fog::FogPlugin, eye_adapt::EyeAdaptPlugin, emittance::EmittancePlugin, water::WaterPlugin, tree::TreePlugin, terrain::TerrainPlugin, reflection::ReflectionPlugin, ripples::RipplesPlugin))
+    .add_plugins((ArchivePlugin(game), lights::LightsPlugin { spot_shadows: args.spot_shadows }, fog::FogPlugin, eye_adapt::EyeAdaptPlugin, emittance::EmittancePlugin, water::WaterPlugin, tree::TreePlugin, terrain::TerrainPlugin, reflection::ReflectionPlugin, ripples::RipplesPlugin))
     .add_plugins((imagespace::ImageSpacePlugin, sky::SkyPlugin, graphics::GraphicsPlugin(graphics, msaa, frame_times)))
     // The switches the settings page weighs against the INI (`--play` only), for the
     // frame split's start-time decision (perf_overlay/split.rs).
@@ -2558,6 +2564,14 @@ mod tests {
         assert_eq!(parse(&["--sun-shadows", "--cell", "Goodsprings"]).sun_shadows, Some(SunShadowMode::Quality));
         assert_eq!(parse(&["--sun-shadows=performance"]).sun_shadows, Some(SunShadowMode::Performance));
         assert_eq!(parse(&["--sun-shadows=quality"]).sun_shadows, Some(SunShadowMode::Quality));
+    }
+
+    /// No authored spot shadow unless the flag asks for one (`--spot-shadows <n>`).
+    #[test]
+    fn spot_shadows_are_off_by_default() {
+        assert_eq!(parse(&["--cell", "Goodsprings"]).spot_shadows, 0);
+        assert_eq!(parse(&["--spot-shadows", "2", "--cell", "Goodsprings"]).spot_shadows, 2);
+        assert!(Args::try_parse_from(["nvforever", "--spot-shadows"]).is_err(), "a count is required");
     }
 
     #[test]
