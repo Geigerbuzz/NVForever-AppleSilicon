@@ -404,7 +404,15 @@ pub fn depth_equal(descriptor: &mut RenderPipelineDescriptor, mesh_key: MeshPipe
 /// the owner's settings (docs/design/streaming-hitches.md §3.1) [observed 2026-10-28].
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[data(50, NifSurfaceUniform, binding_array(101))]
-#[bindless(limit(512), index_table(range(50..54), binding(100)))]
+// The bindless budget is `textures + samplers × slots` against the device's
+// `max_binding_array_sampler_elements_per_shader_stage`. Apple's Metal limit is 1024, and
+// 3 textures × 512 = 1536 does not fit, so the extension silently fell back to non-bindless
+// while `StandardMaterial` stayed bindless — which made the combined layout hold both a
+// binding array and a uniform buffer, and wgpu rejects that. At 64 slots 3 × 64 = 192 fits,
+// and 64 is also what the base material resolves to on Metal. Windows and Linux keep the
+// 512 that was measured there (docs/design/streaming-hitches.md §3.1).
+#[cfg_attr(target_vendor = "apple", bindless(limit(64), index_table(range(50..54), binding(100))))]
+#[cfg_attr(not(target_vendor = "apple"), bindless(limit(512), index_table(range(50..54), binding(100))))]
 #[bind_group_data(NifSurfaceKey)]
 pub struct NifSurface {
     /// Start angle, stop angle (cosines), start opacity, stop opacity; constant opacity 1
