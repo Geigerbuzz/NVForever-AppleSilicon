@@ -512,7 +512,16 @@ impl Plugin for GraphicsPlugin {
                     passes.sort_by(|a, b| b.1.total_cmp(&a.1));
                     let total: f64 = passes.iter().filter(|(n, _)| !n.contains('/')).map(|(_, t)| t).sum();
                     let list: Vec<String> = passes.iter().filter(|(n, _)| !n.contains('/')).take(12).map(|(n, t)| format!("{n} {t:.2}")).collect();
-                    info!("gpu time: {total:.2} ms in all top-level passes; {}", list.join(", "));
+                    if list.is_empty() {
+                        // No pass timestamps: say so. An empty `sum` of floats is -0.0, which
+                        // printed as "-0.00 ms" and was read as "the GPU is free" for months;
+                        // the device's timestamp features are logged once at start-up
+                        // (frame_pace `log_gpu_timestamps`), so the two lines together say
+                        // whether the engine cannot measure or this window had no samples.
+                        info!("gpu time: no pass timestamps in this window; the GPU half is unknown");
+                    } else {
+                        info!("gpu time: {total:.2} ms in all top-level passes; {}", list.join(", "));
+                    }
                     // FSR's parts (fsr.rs sub-spans): AMD's upscaler and NVForever's passes.
                     let fsr: Vec<String> = passes.iter().filter_map(|(n, t)| n.strip_prefix("nvf_fsr_3_1/").map(|part| format!("{part} {t:.3}"))).collect();
                     if !fsr.is_empty() {

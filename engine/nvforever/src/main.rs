@@ -1400,6 +1400,10 @@ fn main() -> AppExit {
         }
     };
     let mut app = App::new();
+    // A measurement run: the frame-time aid, or NVF_TEST_MEASURE=1 (frame_pace::measuring).
+    // Display sync is off and the frame-rate cap zero for it, whatever the INI says, and the
+    // log names the present mode the surface really got (`frame_pace`).
+    let measure = args.log_frame_times.is_some() || frame_pace::measuring();
     // A command for an entity that is gone is logged, not fatal (stray_commands.rs).
     app.set_error_handler(stray_commands::handler);
     // NVF_FIXED_FRAME_TIME_MS=<ms>: every frame moves the clocks on by that much, whatever the
@@ -1425,6 +1429,13 @@ fn main() -> AppExit {
             };
             info!("test aid NVF_TEST_RUN_UNFOCUSED: the game keeps rendering while unfocused");
         });
+    }
+    // NVF_TEST_MEASURE=1: a measurement run (frame_pace `measuring`): display sync off and no
+    // frame-rate cap, whatever the settings say. The present mode the window's surface really
+    // got is logged once it is configured (`frame_pace::log_configured_present_mode`), so the
+    // log proves the run was uncapped rather than asking the reader to trust the switch.
+    if frame_pace::measuring() {
+        app.add_systems(Startup, || info!("test aid NVF_TEST_MEASURE: display sync off, frame-rate cap off"));
     }
     // Asks for VK_AMD_anti_lag or VK_NV_low_latency2 when Bevy creates the device: before
     // DefaultPlugins (anti_lag.rs, nv_low_latency.rs).
@@ -1505,8 +1516,9 @@ fn main() -> AppExit {
                     position: args.window_at.map_or(WindowPosition::Automatic, WindowPosition::At),
                     // Taking over a load: shown once its loading screen is up (handoff.rs).
                     visible: args.handoff.is_none(),
-                    // Measuring frame times: not held to the display's refresh.
-                    present_mode: if args.log_frame_times.is_some() { bevy::window::PresentMode::AutoNoVsync } else { default() },
+                    // Measuring frame times: not held to the display's refresh
+                    // (`--log-frame-times` or NVF_TEST_MEASURE=1).
+                    present_mode: if measure { bevy::window::PresentMode::AutoNoVsync } else { default() },
                     // `NVF_SWAPCHAIN_LATENCY=<n>`: frames the swapchain may queue (images: n + 1;
                     // Bevy's 2 otherwise), for measuring frame generation's pacing.
                     desired_maximum_frame_latency: std::env::var("NVF_SWAPCHAIN_LATENCY").ok().and_then(|v| v.trim().parse::<u32>().ok()).and_then(std::num::NonZeroU32::new),
@@ -1523,7 +1535,10 @@ fn main() -> AppExit {
     // frame split's start-time decision (perf_overlay/split.rs).
     .add_plugins(perf_overlay::PerfOverlayPlugin(args.fps, play.is_some().then(|| settings::given_switches(&args, &command_line()))))
     // Vsync as Bevy's default, off while frame times are measured; no frame-rate cap.
-    .add_plugins(frame_pace::FramePacePlugin(frame_pace::FramePace { sync: if args.log_frame_times.is_none() { frame_pace::DisplaySync::Vsync } else { frame_pace::DisplaySync::Off }, cap: 0 }))
+    .add_plugins(frame_pace::FramePacePlugin {
+        pace: frame_pace::FramePace { sync: if measure { frame_pace::DisplaySync::Off } else { frame_pace::DisplaySync::Vsync }, cap: 0 },
+        measure,
+    })
     .add_plugins(anti_lag::AntiLagPlugin(args.latency_reduction))
     // Defaults snapshots this command-line/default choice before apply_stored reads the INI.
     .add_plugins(frame_gen::FrameGenPlugin(args.frame_generation.unwrap_or_default()))

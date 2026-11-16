@@ -448,6 +448,13 @@ impl SurfaceData {
         self.shared.outdated.load(core::sync::atomic::Ordering::Relaxed)
     }
 
+    /// NVForever (2026-11-16): the present mode the surface is configured with — after
+    /// `present_mode`'s fallbacks — for proving what a measurement run really presents with
+    /// (`nvforever`'s `frame_pace::log_configured_present_mode`).
+    pub fn present_mode(&self) -> wgpu::PresentMode {
+        self.configuration.present_mode
+    }
+
     /// NVForever (2026-11-13): whether [`create_surfaces`] would reconfigure the surface this
     /// frame: `window`'s size or present mode changed, or the surface is marked outdated (also
     /// by a [`HoldSurfaceReconfigure`] that held a change back).

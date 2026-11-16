@@ -43,13 +43,22 @@
 //! `NVF_FG_LAG_FEEDBACK=0` turns it off, for comparisons.
 //!
 //! The present modes the window's surface supports are logged once, with the one vsync
-//! takes there ([`log_present_modes`]).
+//! takes there ([`log_present_modes`]); on macOS, where a second surface cannot be made off
+//! the main thread, the mode the window's own surface was configured with is logged instead
+//! (`log_configured_present_mode`), which is what proves a measurement run is uncapped
+//! (`NVF_TEST_MEASURE=1`, [`measuring`]).
 
 use bevy::prelude::*;
+use bevy::render::renderer::RenderDevice;
+#[cfg(not(target_vendor = "apple"))]
 use bevy::render::renderer::{RenderAdapter, RenderInstance};
 use bevy::render::view::ExtractedWindow;
+#[cfg(target_vendor = "apple")]
+use bevy::render::view::SurfaceData;
 use bevy::render::{Render, RenderApp, RenderSystems};
-use bevy::window::{Monitor, OnMonitor, PresentMode, PrimaryMonitor, PrimaryWindow, RawHandleWrapper, VideoModeSelection, WindowMode};
+use bevy::window::{Monitor, OnMonitor, PresentMode, PrimaryMonitor, PrimaryWindow, VideoModeSelection, WindowMode};
+#[cfg(not(target_vendor = "apple"))]
+use bevy::window::RawHandleWrapper;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -125,7 +134,16 @@ pub struct Refresh {
     pub vrr_cap: u32,
 }
 
-pub struct FramePacePlugin(pub FramePace);
+pub struct FramePacePlugin {
+    pub pace: FramePace,
+    /// A measurement run ([`measuring`] or `--log-frame-times`): display sync off and no cap,
+    /// whatever the settings say ([`apply_vsync`]).
+    pub measure: bool,
+}
+
+/// Whether this run is a measurement run ([`FramePacePlugin::measure`]), kept for the systems.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MeasureRun(pub bool);
 
 /// `NVF_PACE_LOG=1`: every ten seconds one line with what the limiter costs in latency: the
 /// mean time from the start of a frame of the main world (its input is read just before) to
@@ -133,6 +151,19 @@ pub struct FramePacePlugin(pub FramePace);
 /// and the CPU time the render thread spent recording FSR's and frame generation's passes.
 /// A measuring aid.
 static PACE_LOG: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NVF_PACE_LOG").is_ok_and(|v| v.trim() == "1"));
+
+/// `NVF_TEST_MEASURE=1`: a measurement run. Display sync is off and there is no frame-rate
+/// cap, whatever the INI or the settings page say, so a frame time is the frame's own work and
+/// not a wait for the display. The present mode the window's surface really got is logged once
+/// (`log_configured_present_mode`); `--log-frame-times` is such a run too
+/// ([`FramePacePlugin::measure`]). A test aid, not a setting: normal play never sets it.
+static MEASURE_ENV: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NVF_TEST_MEASURE").is_ok_and(|v| v.trim() == "1"));
+
+/// Whether `NVF_TEST_MEASURE` asks for a measurement run; read before the app is built, so
+/// the window is created with the present mode such a run needs.
+pub fn measuring() -> bool {
+    *MEASURE_ENV
+}
 
 /// CPU time recording FSR's ([`Recorded::Fsr`]) and frame generation's passes, and the frames
 /// counted, since the last line (`NVF_PACE_LOG`).
@@ -257,7 +288,8 @@ pub struct ApplyFramePace;
 
 impl Plugin for FramePacePlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(self.0)
+        app.insert_resource(self.pace)
+            .insert_resource(MeasureRun(self.measure))
             .init_resource::<Refresh>()
             .init_resource::<CapClock>()
             .add_systems(Update, (apply_vsync, watch_refresh, tell_physics).chain().in_set(ApplyFramePace))
@@ -266,6 +298,10 @@ impl Plugin for FramePacePlugin {
             app.init_resource::<PaceLog>().add_systems(First, pace_log_frame_start.before(bevy::time::TimeSystems));
         }
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
+            render.add_systems(Render, log_gpu_timestamps);
+            #[cfg(target_vendor = "apple")]
+            render.add_systems(Render, log_configured_present_mode.in_set(RenderSystems::PrepareViews).after(bevy::render::view::prepare_windows));
+            #[cfg(not(target_vendor = "apple"))]
             render.add_systems(Render, log_present_modes.in_set(RenderSystems::PrepareViews).before(bevy::render::view::prepare_windows));
         }
     }
@@ -307,18 +343,26 @@ fn tell_physics(pace: Res<FramePace>, refresh: Res<Refresh>, fg: Option<Res<crat
     physics.set_if_neq(nvf_play::phys_rate::DisplayPace(hz));
 }
 
-/// The window's present mode as `sync` asks, when that changes. (DLSS Frame Generation needs
-/// vsync off on Vulkan: its row's DLSS choice asks for Display sync Off rather than this
-/// overriding it, `frame_gen::dlss_unavailable_reason`.)
-fn apply_vsync(pace: Res<FramePace>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    if !pace.is_changed() {
-        return;
+/// The window's present mode as `sync` asks, when that changes, and off outright while this is
+/// a measurement run ([`MeasureRun`]). Every frame, not only when the resource changes: Bevy
+/// spawns the window entity at start-up and winit gives it its handle in `resumed`, so the
+/// order of the first run and the window is not something to depend on, and a stored INI
+/// applied at PostStartup must not put vsync back on a measuring run. The write is guarded by
+/// an inequality, so a frame where nothing changed costs one window query. (DLSS Frame
+/// Generation needs vsync off on Vulkan: its row's DLSS choice asks for Display sync Off
+/// rather than this overriding it, `frame_gen::dlss_unavailable_reason`.)
+fn apply_vsync(mut pace: ResMut<FramePace>, measure: Res<MeasureRun>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    if measure.0 && (pace.sync != DisplaySync::Off || pace.cap != 0) {
+        // The aid's state, not the settings': the measurement must not wait on the display.
+        pace.sync = DisplaySync::Off;
+        pace.cap = 0;
+        info!("frame pace: measurement run: display sync off and no frame-rate cap, whatever the settings say");
     }
     let mode = if pace.sync.vsync() { PresentMode::AutoVsync } else { PresentMode::AutoNoVsync };
     for mut w in &mut windows {
         if w.present_mode != mode {
             w.present_mode = mode;
-            info!("frame pace: vsync {}", if pace.sync.vsync() { "on" } else { "off" });
+            info!("frame pace: vsync {} (present mode asked: {mode:?})", if pace.sync.vsync() { "on" } else { "off" });
         }
     }
 }
@@ -474,6 +518,7 @@ pub(crate) fn cap_rate(world: &mut World) {
 /// The present mode Bevy takes for vsync on a surface offering `modes`: FIFO relaxed when
 /// there, else FIFO (bevy_render 0.20 `view::window::present_mode`, its AutoVsync
 /// fallbacks) [documented: wgpu-types 30 `PresentMode::AutoVsync`].
+#[cfg(any(not(target_vendor = "apple"), test))]
 fn vsync_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     if modes.contains(&wgpu::PresentMode::FifoRelaxed) {
         wgpu::PresentMode::FifoRelaxed
@@ -484,14 +529,43 @@ fn vsync_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
 
 /// Metal's present modes are not read: on macOS a window's `NSView` may only be touched on
 /// the main thread, and this system runs on the render thread, so making a second surface
-/// here traps (`raw-window-metal`).
+/// here traps (`raw-window-metal`). The mode the window's own surface was configured with is
+/// logged instead ([`log_configured_present_mode`]).
 #[cfg(target_vendor = "apple")]
-fn log_present_modes(_windows: Query<(&ExtractedWindow, &RawHandleWrapper)>, _instance: Res<RenderInstance>, _adapter: Res<RenderAdapter>, mut done: Local<bool>) {
+fn log_configured_present_mode(windows: Query<(&ExtractedWindow, &SurfaceData)>, mut said: Local<Option<(PresentMode, wgpu::PresentMode)>>) {
+    for (w, data) in &windows {
+        let now = (w.present_mode, data.present_mode());
+        if *said == Some(now) {
+            continue;
+        }
+        *said = Some(now);
+        let (asked, got) = now;
+        // `wgpu-hal`'s Metal surface turns Immediate into `setDisplaySyncEnabled(false)`
+        // (vendor/wgpu-hal/src/metal/surface.rs), and Fifo into true: these are the two modes
+        // a Metal surface offers, so `got` is the whole truth about the present.
+        info!("frame pace: present mode {got:?} configured on the surface (asked {asked:?}); on Metal Immediate is displaySyncEnabled=false, so the frame does not wait for the display");
+    }
+}
+
+/// Log once the device's timestamp features. `gpu time` can only be measured when Bevy's
+/// command-encoder spans can take timestamps: the query set needs `TIMESTAMP_QUERY`, and every
+/// span needs `TIMESTAMP_QUERY_INSIDE_ENCODERS`
+/// (vendor/bevy_render/src/diagnostic/internal.rs, `write_timestamp`). Both are asks of the
+/// device: `WgpuSettingsPriority::Functionality` already requests every feature the adapter
+/// offers (vendor/bevy_render/src/renderer/mod.rs), so this line says whether Metal can do it
+/// at all — not whether the engine asked.
+fn log_gpu_timestamps(device: Res<RenderDevice>, mut done: Local<bool>) {
     if *done {
         return;
     }
     *done = true;
-    info!("frame pace: present modes are not read on macOS (the window's NSView is the main thread's)");
+    let f = device.features();
+    info!(
+        "frame pace: GPU timestamps: TIMESTAMP_QUERY={}, TIMESTAMP_QUERY_INSIDE_ENCODERS={}, TIMESTAMP_QUERY_INSIDE_PASSES={}",
+        f.contains(wgpu::Features::TIMESTAMP_QUERY),
+        f.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
+        f.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
+    );
 }
 
 /// Log once the present modes the primary window's surface supports: a surface of its
