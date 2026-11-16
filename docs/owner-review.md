@@ -715,21 +715,19 @@ the spec it links to.
     "gone" to scripts that test it). Observer check 172 asks the original.
     ([doors §6](spec-notes/doors.md))
 
-65. **A murder no longer makes the player an enemy of a faction that is no side (#2456).**
-    A witnessed murder still makes the player an enemy of the victim's crime-tracking
-    factions, except one whose members' records also name factions that are enemies of
-    each other: in FalloutNV.esm only ArmorVCaesarsLegionFaction (Legionaries and the four
-    NCR troopers of the Strip scene VStripSS3) and FeralGhoulFaction [observed]. Killing
-    a Legionary in front of another had turned those four troopers on the player for
-    good, and House's Securitrons with them. A save holding such an enemy loses it on
-    load. If you rule otherwise: name the factions by hand, or stop making the player a
-    faction's enemy on murder at all (observer check 184 asks what the original does).
-    **Ruled 2026-11-15 (owner, on #2498): the rule stands.** Karl at Red Rock (VRRCKarl
-    0x00140E60) is in ArmorVCaesarsLegionFaction and two other factions, not
-    VCaesarsLegionFaction [observed: `fnvtool esm decode`], so a Legionary's murder at
-    Cottonwood Cove no longer turns him on the player; #2506's Karl scenarios now check
-    that (smoke `crime-karl-no-side`, `crime-expiry-legion-calm`).
-    ([crime-karma §3.4](spec-notes/crime-karma.md))
+65. **A murder's faction flag is short-lived (#2456, #2498).** A witnessed murder makes
+    the player an enemy of every crime-tracking faction of the victim's, the "no side"
+    armour faction ArmorVCaesarsLegionFaction too, as the original does; the flag clears
+    by itself 0.18 game hours (11 game minutes) after the crime instead of after
+    iCoolDownTimerSetting's 3 days. The witnesses' own grudges still last 3 days. In the
+    original a Cove murder flagged both VCaesarsLegionFaction and the armour faction, and
+    both read 0 again 0.18 game hours later; Karl at Red Rock then stayed seated, and
+    attacks only while the armour flag is up [observed: observer check 203, 2026-11-15].
+    That every crime's flag (a theft's, the Evil faction's area alert) lasts as long is a
+    [hypothesis]. #2498 first proposed never flagging a faction that is no side; that
+    rule is dropped. **Ruled 2026-11-16 (owner, on #2498, after check 203): "Short-lived
+    flag".** Smoke `crime-karl-flag-clears`, `crime-expiry-legion-calm`.
+    ([crime-karma §3.4, §3.7](spec-notes/crime-karma.md))
 66. **A script package added again after it is done starts over (#2424).** The Lucky
     38 elevator Victor's script adds his talk package on every talk and waits for the
     conversation before it shows the floor box; after Stay Here a second talk opened

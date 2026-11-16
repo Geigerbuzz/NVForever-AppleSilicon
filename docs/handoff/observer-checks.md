@@ -2483,7 +2483,11 @@ already talking takes over at once, same topic or another; nothing is queued or 
      ArmorVCaesarsLegionFaction` (0x00134B6E); then enter the Strip by the north gate and
      watch the four troopers (VStripSS3Girl01REF/02REF, VStripSS3Watcher01REF/02REF) and
      the Securitrons. If neither flag is set, the original sets no faction enemy on
-     murder and only the witnesses turn.
+     murder and only the witnesses turn. **Answered by check 203** [observed, 2026-11-15]:
+     both flags are set by the murder and both clear by themselves about 0.18 game hours
+     later; the Strip part was not run. NVForever now flags every crime-tracking faction
+     for 0.18 game hours (#2498).
+
 ## Added 2026-11-15 (Anders's head on the cross, #2471)
 
 174. **Does a crucified actor turn his head to the player, and is he ever seen climbing
@@ -2867,7 +2871,7 @@ already talking takes over at once, same topic or another; nothing is queued or 
        GetActorCrimePlayerEnemy, IsPCAMurderer and the Legion's infamy and fame. With no
        crime, Karl detects the player, sits (GetSitting 3), stays at relation 0 and never
        fights, on entry and at noon on each of the next four days.
-     - **1. Seen murder.** The staging is #2498's `crime-karl-no-side`: the player at
+     - **1. Seen murder.** The staging is #2498's `crime-karl-no-side` (since renamed `crime-karl-flag-clears`): the player at
        (63363, -89150) at Cottonwood Cove, hour 12, NVCCAureliusREF 0x0012D6E2 about 400
        units off. Shots by TapControl never fired in the unfocused game, and FireWeapon
        never hit. The kill that worked is `NVCCLegionary4REF.Kill player`, with the

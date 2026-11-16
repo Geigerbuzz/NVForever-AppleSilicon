@@ -424,16 +424,16 @@ fn a_reference_counts_towards_the_factions_it_is_in_now() {
     assert!(reputations_of(&g, FormId(STRANGER)).is_empty());
 }
 
-/// #2456: a Legionary murdered before a fellow Legionary makes the player an enemy of the
-/// Legion, but not of the tag faction both are in, which also holds a trooper of the
-/// Legion's enemy: the trooper does not turn on the player for it.
+/// #2456, #2498: a Legionary murdered before a fellow Legionary makes the player an enemy
+/// of every crime-tracking faction of the victim's, the tag faction both are in too, which
+/// also holds a trooper of the Legion's enemy, as the original flags
+/// ArmorVCaesarsLegionFaction (observer check 203). The trooper turns on the player while
+/// the flag lasts; 0.18 game hours later the flags are gone and only the witness's own
+/// grudge is left.
 #[test]
-fn a_murder_makes_no_enemy_of_a_faction_that_is_no_side() {
+fn a_murder_flags_the_victims_factions_for_minutes() {
     let f = fixture();
     let mut g = game(&f);
-    assert!(g.faction_is_one_side(FormId(LEGION)));
-    assert!(g.faction_is_one_side(FormId(TOWN)));
-    assert!(!g.faction_is_one_side(FormId(TAG)), "its members' factions are enemies");
     assert!(!g.would_attack(FormId(TROOPER_REF), FormId::PLAYER_REF));
     sees(&mut g, DECANUS_REF);
     g.crimes.take_notes();
@@ -441,19 +441,18 @@ fn a_murder_makes_no_enemy_of_a_faction_that_is_no_side() {
     let notes = g.crimes.take_notes();
     assert!(notes.iter().any(|n| matches!(n, Note::Crime { kind: Kind::Murder, hostile, .. } if hostile == &vec![FormId(DECANUS_REF)])));
     assert!(g.player.enemy_of.contains(&FormId(LEGION)));
-    assert!(!g.player.enemy_of.contains(&FormId(TAG)));
-    assert!(!notes.iter().any(|n| matches!(n, Note::FactionEnemy { faction } if *faction == FormId(TAG))));
-    assert!(g.would_attack(FormId(DECANUS_REF), FormId::PLAYER_REF));
-    assert!(!g.would_attack(FormId(TROOPER_REF), FormId::PLAYER_REF), "the trooper is not one of the Legion's people");
-    // A save from before the fix holding the tag: dropped on load.
-    g.player.enemy_of.insert(FormId(TAG));
+    assert!(g.player.enemy_of.contains(&FormId(TAG)), "a faction whose members fight each other is flagged too");
+    assert!(g.would_attack(FormId(TROOPER_REF), FormId::PLAYER_REF), "by the tag's flag");
+    // 0.17 game hours: still flagged.
+    pass_hours(&mut g, 0.17);
     assert!(g.would_attack(FormId(TROOPER_REF), FormId::PLAYER_REF));
-    let snap = g.snapshot();
-    let world = World::new(&f.forms, &f.refs, SimConfig::default());
-    let mut back = Game::restore(&f.data, world, GameConfig { strict: true, ..GameConfig::default() }, &snap).unwrap();
-    assert!(back.player.enemy_of.contains(&FormId(LEGION)));
-    assert!(!back.player.enemy_of.contains(&FormId(TAG)));
-    assert!(!back.would_attack(FormId(TROOPER_REF), FormId::PLAYER_REF));
+    // 0.19: both flags cleared; the witness still fights by its own crime.
+    pass_hours(&mut g, 0.02);
+    let (mut factions, actors) = ended(&mut g);
+    factions.sort();
+    assert_eq!((factions, actors), (vec![FormId(LEGION), FormId(TAG)], vec![]));
+    assert!(!g.would_attack(FormId(TROOPER_REF), FormId::PLAYER_REF));
+    assert!(g.would_attack(FormId(DECANUS_REF), FormId::PLAYER_REF));
 }
 
 #[test]
@@ -682,25 +681,34 @@ fn ended(g: &mut Game) -> (Vec<FormId>, Vec<FormId>) {
     (factions, actors)
 }
 
+/// The faction's flag lasts 0.18 game hours (observer check 203, #2498); the witness's
+/// own grudge iCoolDownTimerSetting days.
 #[test]
-fn a_seen_murders_enmity_ends_after_icooldowntimersetting_days() {
+fn a_seen_murders_flag_ends_in_minutes_and_the_witnesss_grudge_in_three_days() {
     let f = fixture();
     let mut g = game(&f);
     assert_eq!(days(&g), DAYS_PASSED_START);
     assert!(!g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF), "before the crime");
     murder_townsman(&mut g);
     g.crimes.take_notes();
-    // 71 hours waited: not yet three days.
-    pass_hours(&mut g, 71.0);
+    // 0.17 game hours: the town's flag holds.
+    pass_hours(&mut g, 0.17);
     assert!(g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF));
+    assert_eq!(ended(&mut g), (vec![], vec![]));
+    // 0.19: cleared; the witness still fights by its own crime.
+    pass_hours(&mut g, 0.02);
+    assert!(!g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF), "the flag is cleared");
+    assert!(g.would_attack(FormId(SHOPKEEPER_REF), FormId::PLAYER_REF));
+    assert_eq!(ended(&mut g), (vec![FormId(TOWN)], vec![]));
+    assert_eq!(faction_flag(&mut g, TOWN), 0.0);
+    // 71 hours: not yet three days for the witness.
+    pass_hours(&mut g, 71.0 - 0.19);
     assert!(g.would_attack(FormId(SHOPKEEPER_REF), FormId::PLAYER_REF));
     assert_eq!(ended(&mut g), (vec![], vec![]));
-    // Two more (a sleep): the crime is three days old, both enmities end.
+    // Two more (a sleep): the crime is three days old, the witness forgives.
     pass_hours(&mut g, 2.0);
-    assert!(!g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF), "the flag is cleared");
     assert!(!g.would_attack(FormId(SHOPKEEPER_REF), FormId::PLAYER_REF), "the witness forgave");
-    assert_eq!(ended(&mut g), (vec![FormId(TOWN)], vec![FormId(SHOPKEEPER_REF)]));
-    assert_eq!(faction_flag(&mut g, TOWN), 0.0);
+    assert_eq!(ended(&mut g), (vec![], vec![FormId(SHOPKEEPER_REF)]));
     assert_eq!(call(&mut g, GET_ACTOR_CRIME_PLAYER_ENEMY, Some(SHOPKEEPER_REF), &[]), 0.0);
     assert!(g.player.enemy_of_crimes.is_empty() && g.player.crime_enemy_since.is_empty());
 }
@@ -754,18 +762,19 @@ fn a_later_crime_restarts_the_count() {
     let f = fixture();
     let mut g = game(&f);
     murder_townsman(&mut g);
-    // Day 2: the shopkeeper, a crime enemy, killed in front of the second townsman (still
-    // murder: a crime of the player's made it hostile) dates the town's flag again.
-    pass_hours(&mut g, 48.0);
+    // 0.1 game hours on: the shopkeeper, a crime enemy, killed in front of the second
+    // townsman (still murder: a crime of the player's made it hostile) dates the town's
+    // flag again.
+    pass_hours(&mut g, 0.1);
     g.detection.pairs.clear();
     sees(&mut g, TOWNSMAN2_REF);
     assert!(g.kill(FormId(SHOPKEEPER_REF), Some(FormId::PLAYER_REF)));
-    assert!((g.player.enemy_of_crimes[&FormId(TOWN)] - (DAYS_PASSED_START + 2.0)).abs() < 1e-3);
-    // Four days after the first murder, two after the second: still an enemy.
-    pass_hours(&mut g, 48.0);
+    assert!((g.player.enemy_of_crimes[&FormId(TOWN)] - (DAYS_PASSED_START + 0.1 / 24.0)).abs() < 1e-4);
+    // 0.25 hours after the first murder, 0.15 after the second: still an enemy.
+    pass_hours(&mut g, 0.15);
     assert!(g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF));
-    // Three days after the second: no more.
-    pass_hours(&mut g, 25.0);
+    // 0.19 after the second: no more.
+    pass_hours(&mut g, 0.04);
     assert!(!g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF));
     // A witness's own enmity restarts with a later crime it sees: a theft on day 2.
     let mut g = game(&f);
@@ -840,8 +849,10 @@ fn a_murder_seen_only_by_hostile_witnesses_restarts_the_count() {
     murder_townsman(&mut g);
     assert!(g.player.crime_enemies.contains(&FormId(TOWNSMAN2_REF)));
     // Day 2: the second townsman (a crime enemy: still murder) killed in front of the
-    // shopkeeper alone, who is a crime enemy already and turns no further.
+    // shopkeeper alone, who is a crime enemy already and turns no further. The town's
+    // flag, gone since minutes after the first murder, is set again.
     pass_hours(&mut g, 48.0);
+    assert!(!g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF));
     g.detection.pairs.clear();
     sees(&mut g, SHOPKEEPER_REF);
     g.crimes.take_notes();
@@ -849,12 +860,13 @@ fn a_murder_seen_only_by_hostile_witnesses_restarts_the_count() {
     assert!(g.crimes.take_notes().iter().any(|n| matches!(n, Note::Crime { kind: Kind::Murder, hostile, .. } if hostile.is_empty())));
     assert!((g.player.enemy_of_crimes[&FormId(TOWN)] - (DAYS_PASSED_START + 2.0)).abs() < 1e-3, "the town's count restarts");
     assert!((g.player.crime_enemy_since[&FormId(SHOPKEEPER_REF)] - (DAYS_PASSED_START + 2.0)).abs() < 1e-3, "so does the witness's");
-    // Four days after the first murder, two after the second: still enemies.
-    pass_hours(&mut g, 48.0);
     assert!(g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF));
+    // Four days after the first murder, two after the second: the witness still fights,
+    // the town's flag is long gone.
+    pass_hours(&mut g, 48.0);
+    assert!(!g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF));
     assert!(g.would_attack(FormId(SHOPKEEPER_REF), FormId::PLAYER_REF));
     // Three days after the second: no more.
     pass_hours(&mut g, 25.0);
-    assert!(!g.would_attack(FormId(WATCHMAN_REF), FormId::PLAYER_REF));
     assert!(!g.would_attack(FormId(SHOPKEEPER_REF), FormId::PLAYER_REF));
 }
