@@ -1209,7 +1209,15 @@ fn spawn_ref(
         // billboard drops the reference's rotation: it has no facing of its own.
         if let Some(v) = trees.visual(world, base.form_id, models) {
             let rt = Mat4::from(to_cell * ref_affine(&p));
-            stats.shapes += crate::tree::spawn(commands, cell_e, &v, rt, RefVisual(r));
+            // The billboard that stands in beyond the tree LOD distance (treelod.rs);
+            // without a billboard picture the tree is drawn whole at every distance, as
+            // before.
+            let board = spawn_lod_board(commands, cell_e, world, &p, r, origin, base.form_id, models);
+            stats.shapes += if board > 0 {
+                board + crate::tree::spawn(commands, cell_e, &v, rt, (RefVisual(r), crate::treelod::TreeLodPart))
+            } else {
+                crate::tree::spawn(commands, cell_e, &v, rt, RefVisual(r))
+            };
             stats.refs_speedtree += 1;
             return;
         }
@@ -1660,6 +1668,34 @@ fn billboard(world: &WorldData, tree: u32, models: &mut ModelCtx) -> Option<(Han
     })();
     models.cache.set_billboard(tree, made.clone());
     made
+}
+
+/// The billboard of tree reference `r` for the tree LOD (`crate::treelod`): the TREE
+/// record's own picture (world.md §2), one upright quad at the reference's foot, turned
+/// towards the camera by [`face_billboards`], drawn only beyond the tree LOD distance
+/// (and on the pixels a fading cell leaves out of the tree) and culled nearer. Lit like
+/// the ground under it, as the billboards of trees whose geometry is not generated.
+///
+/// Returns the entities it spawned (1), or 0 when the base has no billboard picture: its
+/// trees are then drawn whole at every distance, as before.
+#[allow(clippy::too_many_arguments)]
+fn spawn_lod_board(commands: &mut Commands, cell_e: Entity, world: &WorldData, p: &Placement, r: u32, origin: Vec3, base: u32, models: &mut ModelCtx) -> usize {
+    let Some((mesh, mat)) = billboard(world, base, models) else { return 0 };
+    let t = Transform::from_translation(Vec3::from_array(p.position) - origin).with_scale(Vec3::splat(p.scale));
+    commands.entity(cell_e).with_child((
+        Mesh3d(mesh),
+        MeshMaterial3d(mat),
+        t,
+        TreeBillboard,
+        crate::treelod::TreeLodBoard,
+        // The tree's generated parts cast no shadow beyond the distance either
+        // (`shadow_rate::far_trees_cast_no_shadow` is the near-camera rule); a card
+        // casting a shadow would be a square.
+        bevy::light::NotShadowCaster,
+        bevy::light::NotShadowReceiver,
+        RefVisual(r),
+    ));
+    1
 }
 
 /// The game's own marker for a model it could not load: a big red sign with an

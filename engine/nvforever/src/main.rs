@@ -295,6 +295,11 @@ struct Args {
     /// Distant trees drawn as billboards out to this distance (fTreeLoadDistance); 0: none.
     #[arg(long, default_value_t = 40_000.0)]
     tree_distance: f32,
+    /// Trees of the loaded cells are drawn whole within this distance (game units) and as
+    /// their billboards beyond it; 0 draws them whole as far as their cells (treelod.rs;
+    /// the settings page's Tree distance row is a part of it).
+    #[arg(long, default_value_t = treelod::TREE_LOD_FULL)]
+    tree_lod_distance: f32,
     /// Do not draw distant LOD.
     #[arg(long)]
     no_lod: bool,
@@ -1544,6 +1549,9 @@ fn main() -> AppExit {
         generate: fnv_world::grass::GrassSettings { min_size: args.grass_min_size, density_scale: args.grass_density.max(0.0), ..Default::default() },
     }))
     .add_plugins(draw_distance::DrawDistancePlugin(draw_distance::DrawDistances::new(&args)))
+    // Trees of the loaded cells: generated geometry within a distance, their billboard
+    // beyond it (treelod.rs).
+    .add_plugins(treelod::TreeLodPlugin(treelod::TreeLod { full: args.tree_lod_distance.max(0.0), part: 1.0 }))
     // Small objects far away cast no sun shadows (shadow_thin.rs).
     .add_plugins(shadow_thin::ShadowThinPlugin(args.shadow_thin))
     .add_plugins(shadow_rate::ShadowRatePlugin { performance: performance_shadows })

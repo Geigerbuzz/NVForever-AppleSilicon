@@ -25,6 +25,7 @@ use crate::nav::NavState;
 use crate::perf_overlay::{FpsCounter, Low};
 use crate::player_body::PlayerBody;
 use crate::sky::SkyState;
+use crate::treelod::TreeLod;
 use crate::upscaler::{DlssModel, UpscaleQuality, Upscaler, UpscalerChoice};
 use crate::window_mode;
 use crate::world::Streamer;
@@ -772,6 +773,13 @@ fn register_distances(app: &mut App) {
             "Grass distance",
             "How far from you grass is drawn, as a part of the farthest grass distance and its fade range.",
             slider(|w| w.resource::<DrawDistances>().grass, draw_distance::set_grass),
+        ),
+        Setting::slider(
+            "tree-distance",
+            GROUP_PICTURE,
+            "Tree distance",
+            "How far from you trees of the loaded cells are drawn as trees; farther ones are their flat pictures, which look the same at that distance and cost much less.",
+            slider(|w| w.resource::<TreeLod>().part, draw_distance::set_trees),
         ),
     ];
     for s in sliders {

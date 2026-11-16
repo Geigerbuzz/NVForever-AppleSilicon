@@ -86,6 +86,20 @@ pub fn drawn_within(distance: Option<f32>, fade: f32) -> VisibilityRange {
     }
 }
 
+/// Draws a mesh only beyond `distance` (game units from the camera), dithering in over
+/// `fade` × `distance` past it: the exact complement of the pixels [`drawn_within`]`(Some(distance),
+/// fade)` leaves out at the same place, so two meshes standing at one point (a tree and its
+/// billboard, treelod.rs) crossfade as the camera moves with no popping and no pixel drawn
+/// twice.
+pub fn drawn_beyond(distance: f32, fade: f32) -> VisibilityRange {
+    let d = distance.max(1.0);
+    let f = fade.max(0.01);
+    // `end_margin` is [`drawn`]`(STEPS)`'s: past any view, so only the start's dither-in
+    // hides the mesh, and the CPU culls it while the camera is nearer than `d`
+    // (`VisibilityRange::is_visible_at_all`).
+    VisibilityRange { start_margin: d..d * (1.0 + f), end_margin: drawn(STEPS).end_margin, use_aabb: false }
+}
+
 /// Whether a mesh's range is a fully drawn one ([`drawn`]`(STEPS)` or a
 /// [`drawn_within`]), not a fade's step.
 pub fn at_rest(r: &VisibilityRange) -> bool {
@@ -114,7 +128,11 @@ type Fading = Or<(
 /// so a cell loaded this frame has its range before it is first drawn; cells loaded
 /// fully drawn come through here once too). A cell that has faded in fully drops its
 /// fade; its meshes keep the fully drawn range (module docs).
-pub fn fade_cells(mut commands: Commands, mut streamer: ResMut<Streamer>, children: Query<&Children>, meshes: Query<(), Fading>) {
+///
+/// A tree's billboard ([`crate::treelod::TreeLodBoard`]) is left out: it is the *other*
+/// half of its tree's crossfade, so `treelod::range_loaded_trees` gives it the
+/// complementary range of the step here instead of the step itself.
+pub fn fade_cells(mut commands: Commands, mut streamer: ResMut<Streamer>, children: Query<&Children>, meshes: Query<(), (Fading, Without<crate::treelod::TreeLodBoard>)>) {
     let Streamer { fades, loaded, .. } = &mut *streamer;
     fades.retain(|c, f| {
         let Some(&cell) = loaded.get(c) else { return false };
@@ -149,6 +167,33 @@ mod tests {
             return false;
         }
         !((level >= 0 && level + threshold >= 16) || (level < 0 && 1 + level + threshold <= 0))
+    }
+
+    /// A far range is the near range's complement: what one leaves out the other draws,
+    /// pixel for pixel, wherever both are submitted (treelod.rs's trees and billboards).
+    #[test]
+    fn a_far_range_is_the_near_range_drawn_on_the_other_pixels() {
+        for d in [1.0, 3_000.0, 6_000.0, 60_000.0] {
+            let (near, far) = (drawn_within(Some(d), 0.1), drawn_beyond(d, 0.1));
+            assert!(!near.is_abrupt() && !far.is_abrupt());
+            for at in [0.0, d - 1.0, d, d * 1.05, d * 1.099, d * 1.101, d * 2.0, 1.0e6] {
+                let (n, f) = (near.is_visible_at_all(at), far.is_visible_at_all(at));
+                assert!(n || f, "d {d} at {at}: neither is drawn");
+                match (n, f) {
+                    (true, true) => {
+                        let (a, b) = (level(&near, at), level(&far, at));
+                        assert_eq!(a, b - 16, "d {d} at {at}");
+                        for t in 0..16 {
+                            assert_ne!(kept(a, t), kept(b, t), "d {d} at {at}: pixel {t}");
+                        }
+                    }
+                    // Only one is submitted, and it is drawn whole there.
+                    (true, false) => assert_eq!(level(&near, at), 0, "d {d} at {at}"),
+                    (false, true) => assert_eq!(level(&far, at), 0, "d {d} at {at}"),
+                    (false, false) => unreachable!(),
+                }
+            }
+        }
     }
 
     /// Every material that dithers by its range is given a cell's fade steps: the ground

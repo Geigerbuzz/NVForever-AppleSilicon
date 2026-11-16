@@ -14,6 +14,21 @@
 //! shader (tree.wesl `TREE_BILLBOARD`), so the meshes never change. A loaded cell draws
 //! its own trees; its billboards crossfade with it (fade.rs, the complementary pattern,
 //! culled once the cell is fully drawn). Billboards cast and receive no shadows.
+//!
+//! Inside the loaded cells a tree was generated geometry at every distance until this
+//! (the objects draw-distance slider never touched trees): now it is generated geometry
+//! within [`TREE_LOD_FULL`] × the Tree distance row and its own billboard beyond, out to
+//! where its cell stops. Every TREE reference of a loaded cell gets one more child, its
+//! billboard ([`TreeLodBoard`], the TREE record's picture in `world.rs` `spawn_ref`);
+//! `range_loaded_trees` gives the generated parts `fade::drawn_within` that distance
+//! and the billboard `fade::drawn_beyond` it. The two ranges are exact complements, so a
+//! tree the camera crosses the distance of dithered-crossfades over a tenth of it, and
+//! while a cell fades in its billboard takes the complement of the fade's step, filling
+//! the holes the fade dithers into the tree. The generated parts of a tree past the
+//! distance are culled on the CPU by their range, so they leave the depth prepass, the
+//! main pass and the sun's cascades — where a generated tree is a thousand alpha-tested
+//! cards (`tree.rs`, speedtree.md §4) — for two triangles that cast and receive no
+//! shadow.
 
 use crate::fade;
 use crate::lod::{square_distance, LodState};
@@ -21,7 +36,7 @@ use crate::tree::{BillboardMaterial, TreeBillboards};
 use crate::world::{bevy_to_game, Streamer, WorldData, WorldRoot};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::primitives::Aabb;
-use bevy::camera::visibility::NoAutoAabb;
+use bevy::camera::visibility::{NoAutoAabb, VisibilityRange};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -80,6 +95,154 @@ impl DistantTrees {
         self.centre = None;
         self.want.clear();
         self.count = 0;
+    }
+}
+
+/// The tree LOD distance at the row's fullest: a loaded cell's tree is generated
+/// geometry within this and its billboard beyond (game units: about 86 m).
+///
+/// No record gives this: the game draws full SpeedTrees out to fTreeLoadDistance
+/// (25,000-40,000, world.md §2; speedtree.md "Distant trees") and this file's cards take
+/// over for the cells beyond the loaded ring. Where a *loaded* tree becomes its picture
+/// is NVForever's choice [engineering choice]: at 6,000 units a 175-unit tree (TREE BNAM)
+/// stands about 20 pixels tall at 1280×800 (`--fov 75`, the default), and its billboard —
+/// the record's own side view, turned towards the camera — reads as the tree at that size
+/// [hypothesis; the distance is what the Tree distance row is for, to compare in
+/// screenshots].
+pub const TREE_LOD_FULL: f32 = 6_000.0;
+
+/// The generated parts (bark and leaf cards) of a TREE reference whose tree has a
+/// billboard to stand in for it beyond the tree LOD distance (`world.rs` `spawn_ref`).
+/// Copy and Clone: `tree::spawn` clones the bundle it is given for every part.
+#[derive(Component, Clone, Copy)]
+pub struct TreeLodPart;
+
+/// A TREE reference's billboard, drawn only beyond the tree LOD distance (and, while its
+/// cell fades, on the pixels the fade leaves out of the tree): the TREE record's own
+/// picture, `textures\trees\billboards\<stem>.dds` at the record's BNAM size (world.md
+/// §2, speedtree.md §6), one upright quad at the reference's foot, turned towards the
+/// camera by `world::face_billboards`, lit like the ground under it.
+#[derive(Component)]
+pub struct TreeLodBoard;
+
+/// The loaded cells' tree LOD distance: `full` × `part` (game units). The full distance
+/// is `--tree-lod-distance`; the part is the settings page's Tree distance row, 100% by
+/// default. A distance of 0 draws every tree whole, as before.
+#[derive(Resource, Clone, Debug, PartialEq)]
+pub struct TreeLod {
+    pub full: f32,
+    pub part: f32,
+}
+
+impl Default for TreeLod {
+    fn default() -> TreeLod {
+        TreeLod { full: TREE_LOD_FULL, part: 1.0 }
+    }
+}
+
+impl TreeLod {
+    /// Where a tree changes from generated geometry to its billboard (game units).
+    pub fn distance(&self) -> f32 {
+        self.full.max(0.0) * self.part.clamp(0.0, 1.0)
+    }
+}
+
+/// The dither step of each loaded cell still fading in or out, by the cell's entity
+/// (fade.rs).
+fn fading_cells(streamer: &Streamer) -> HashMap<Entity, u8> {
+    streamer.fades.iter().filter_map(|(g, f)| Some((*streamer.loaded.get(g)?, fade::step(f.level)))).collect()
+}
+
+/// Give the loaded cells' trees their ranges (module notes): the generated parts while
+/// their cell fades and within the tree LOD distance, the billboard on the fade's other
+/// pixels and beyond the distance (0: the billboard is culled and every tree whole).
+///
+/// Both meshes stand at the same point, so `fade::drawn_beyond` is the exact complement
+/// of `fade::drawn_within`: crossing the distance, and a cell fading in, change a tree's
+/// picture with no pop and no pixel drawn twice (fade.rs tests).
+#[allow(clippy::type_complexity)]
+fn range_loaded_trees(
+    mut commands: Commands,
+    lod: Res<TreeLod>,
+    streamer: Option<Res<Streamer>>,
+    changed: Query<Entity, (With<TreeLodPart>, Or<(Added<TreeLodPart>, Changed<VisibilityRange>)>)>,
+    all: Query<Entity, With<TreeLodPart>>,
+    parts: Query<Option<&VisibilityRange>, (With<TreeLodPart>, Without<TreeLodBoard>)>,
+    boards: Query<(Entity, Option<&VisibilityRange>, &ChildOf), (With<TreeLodBoard>, Without<TreeLodPart>)>,
+) {
+    let d = lod.distance();
+    // The parts: their cell's fade owns them until it rests (`fade::at_rest`), then the
+    // distance.
+    let near = fade::drawn_within((d > 0.0).then_some(d), crate::draw_distance::FADE);
+    let todo: Vec<Entity> = if lod.is_changed() { all.iter().collect() } else { changed.iter().collect() };
+    for e in todo {
+        let Ok(range) = parts.get(e) else { continue };
+        let keep = match range {
+            Some(r) => *r == near || !fade::at_rest(r),
+            None => false,
+        };
+        if !keep {
+            commands.entity(e).insert(near.clone());
+        }
+    }
+    // The billboards: the complement of their cell's fade until it rests, then the
+    // distance.
+    let far = if d > 0.0 {
+        fade::drawn_beyond(d, crate::draw_distance::FADE)
+    } else {
+        // No distance: every tree is whole, so its billboard is culled entirely.
+        fade::complement(fade::STEPS)
+    };
+    let fading: HashMap<Entity, u8> = streamer.as_deref().map(fading_cells).unwrap_or_default();
+    for (e, range, parent) in &boards {
+        let want = match fading.get(&parent.parent()).copied().filter(|&k| k < fade::STEPS) {
+            // Normally the fade's step, whatever the cell fade is doing.
+            Some(k) if d > 0.0 => fade::complement(k),
+            _ => far.clone(),
+        };
+        if range != Some(&want) {
+            commands.entity(e).insert(want);
+        }
+    }
+}
+
+/// How many trees are billboards now, every two seconds and when the number changes: the
+/// line a bench reads back (with `shadow casters per cascade`, and the overlay's
+/// `speedtree` count beside it). The trees of a base without a billboard are drawn whole
+/// and are not among them (`world.rs` `spawn_ref`).
+fn report_tree_lod(
+    time: Res<Time>,
+    lod: Res<TreeLod>,
+    camera: Query<&GlobalTransform, crate::fly::WorldCamera>,
+    boards: Query<&GlobalTransform, With<TreeLodBoard>>,
+    mut since: Local<f32>,
+    mut said: Local<Option<(i64, usize, usize)>>,
+) {
+    *since += time.delta_secs();
+    if *since < 2.0 {
+        return;
+    }
+    *since = 0.0;
+    let d = lod.distance();
+    let total = boards.iter().count();
+    let far = match (d > 0.0, camera.iter().next()) {
+        (true, Some(cam)) => boards.iter().filter(|t| t.translation().distance(cam.translation()) >= d).count(),
+        _ => 0,
+    };
+    let line = ((d * 100.0).round() as i64, far, total);
+    if *said != Some(line) {
+        *said = Some(line);
+        info!("tree LOD: {far} of {total} SpeedTree refs drawn as billboards beyond {d:.0} units");
+    }
+}
+
+/// The loaded cells' tree LOD (module notes): the [`TreeLod`] resource and its systems.
+pub struct TreeLodPlugin(pub TreeLod);
+
+impl Plugin for TreeLodPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(self.0.clone())
+            .add_systems(Update, (range_loaded_trees.after(fade::fade_cells), report_tree_lod));
     }
 }
 

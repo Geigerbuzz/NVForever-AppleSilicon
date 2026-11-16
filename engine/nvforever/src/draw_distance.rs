@@ -12,7 +12,8 @@
 //!   held items); items are the references whose base is an item a player can take
 //!   (weapons, armour, ammo, aid, books, notes, keys, mods, chips, caps, cards) and the
 //!   items dropped in the game; objects are every other placed model of a loaded cell.
-//!   Imposters, distant LOD, terrain, water and trees are not touched.
+//!   Imposters, distant LOD, terrain, water and the trees' billboards are not touched;
+//!   trees have their own Tree distance row, the distance of the tree LOD (`treelod.rs`).
 //! - **Shadows**: `--shadow-distance` (the sun's shadow cascades end at the slider's part
 //!   of it).
 //! - **Grass**: `--grass-distance` and `--grass-fade-range` together.
@@ -176,14 +177,15 @@ fn classify(e: Entity, r: u32, parents: &Query<&ChildOf>, marks: &Query<(Has<Cel
 
 /// Give the meshes of placed references the range of their class's distance: new meshes
 /// and those whose range changed (a fade ended) each frame, every one when a slider
-/// moved (module notes).
+/// moved (module notes). The trees' billboards are left out: their range is the tree
+/// LOD's (`treelod.rs`).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn apply_ranges(
     mut commands: Commands,
     distances: Res<DrawDistances>,
     world: Option<Res<WorldData>>,
-    changed: Query<Entity, (With<RefVisual>, With<MeshMaterial3d<NifMaterial>>, Or<(Added<RefVisual>, Changed<VisibilityRange>)>)>,
-    all: Query<Entity, (With<RefVisual>, With<MeshMaterial3d<NifMaterial>>)>,
+    changed: Query<Entity, (With<RefVisual>, With<MeshMaterial3d<NifMaterial>>, Without<crate::treelod::TreeLodBoard>, Or<(Added<RefVisual>, Changed<VisibilityRange>)>)>,
+    all: Query<Entity, (With<RefVisual>, With<MeshMaterial3d<NifMaterial>>, Without<crate::treelod::TreeLodBoard>)>,
     mut meshes: Query<(&RefVisual, &mut MeshMaterial3d<NifMaterial>, Option<&VisibilityRange>, Option<&DrawClass>)>,
     parents: Query<&ChildOf>,
     marks: Query<(Has<CellEntity>, Has<ActorRig>, Has<DroppedRoot>)>,
@@ -275,6 +277,13 @@ pub fn set_grass(world: &mut World, v: f32) {
     let mut g = world.resource_mut::<GrassConfig>();
     g.fade_start = start * v;
     g.fade_range = range * v;
+}
+
+/// Trees of the loaded cells are drawn whole out to `v` of `--tree-lod-distance` from now
+/// and as their billboards beyond it (`treelod.rs` gives their parts and billboards the
+/// ranges).
+pub fn set_trees(world: &mut World, v: f32) {
+    world.resource_mut::<crate::treelod::TreeLod>().part = v;
 }
 
 #[cfg(test)]
