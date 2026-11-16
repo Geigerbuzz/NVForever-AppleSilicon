@@ -408,6 +408,32 @@ enhanced "Bloom" (§3.3), when on, stands in for it.
 Engineering choices made by eye against the original's frames; not used to explain
 differences in the parity frames.
 
+### 3.11.1 Cloud upgrade (`--cloud-upgrade`; off by default)
+
+Cloud Upgrade NVSE (Nexus 79612) rebuilt natively in `sky.rs`'s cloud layers and
+`sky.wesl`: the same weather cloud textures read denser and softer, with no new art. Off by
+default; only `--cloud-upgrade` turns it on, and it is not part of `enhanced` or the
+settings page. Off, the shader's new branch is not taken (all its values are zero) and the
+picture is bit-identical.
+
+- **Density** (`sky.wesl` binding 105): the cloud layer's alpha is lifted by
+  `a' = 1 - (1 - a)^1.55`, so a texture whose mean alpha is 0.23 reads about 0.34 and the
+  thin edges thicken without losing the cores or the soft in-between.
+- **Second draw**: each of the four cloud layers is drawn a second time in its own set at
+  `UPGRADE_SECOND_SCALE` 1.7 texture repeats and an offset of (0.37, 0.11), at 0.65 of the
+  first draw's alpha and just past its depth bias. The two copies of the tileable pattern
+  fill each other's gaps, hide the single-texture repeat and soften the cloud edges. The
+  second draw adds no sun glare (the layer's own draw already does).
+- **Fog blending**: near the horizon (view elevation under about 17°) each layer's colour
+  is mixed 35 % towards the weather's fog colour, so the base of the cloud deck dissolves
+  into the haze instead of ending in a line.
+- Cost: four extra transparent sky draws (the cloud domes and bands, not the whole screen)
+  plus one extra multiply and mix in the cloud pixels: about 0.1-0.3 ms at 1280x800
+  [hypothesis, to be measured]. Nothing while off.
+- A correct picture: denser, more continuous cloud cover than vanilla from the same
+  weather, no visible repeat of one texture, soft hazy bases at the horizon, and an
+  identical picture with the switch off.
+
 ### 3.12 Terrain height blending (`terrain-height-blend`; off in both presets)
 
 [design, #2550] An addition of NVForever's own, not a fact about the original game. The
@@ -635,6 +661,40 @@ LOD noise are prior art only; no code was taken from any of them.
   blend=on|off`
   (`NVF_PLAY_TEST_PIPELINE_LOG`, pipeline_gate.rs). Picture and frame-cost evidence is
   recorded above; future visual checks should cover both landscape draw paths.
+
+### 3.14 Cloud shadows (`--cloud-shadows`; off by default)
+
+Cloud Shadows (Nexus 79147) rebuilt natively (`cloud_shadows.rs`): coarse, slowly moving
+patches of shade from the weather's clouds on the ground and on everything standing on it,
+so a clear Mojave noon has a few wisps crossing the sand and an overcast weather dims the
+picture in broad drifts. Off by default, and no switch of the settings page or the presets
+changes it: only `--cloud-shadows` adds it. Off, the plugin inserts nothing, and the
+picture is bit-identical.
+
+- The pass is a full-screen multiply over the tonemapped picture, after the ambient
+  occlusion and the anti-aliasing, before bloom and the grade. The depth prepass's world
+  position (reverse z) is looked up in a 256² tileable mask at 20,000 game units a repeat,
+  so the patches stay on the ground as the camera moves; the sky dome is left out by its
+  distance.
+- Driven by the weather: the WTHR DATA classification flags give the coverage (Pleasant
+  0.25, Cloudy 0.80, Rainy 0.95, Snow 0.75, none 0.35 [hypothesis: there is no coverage
+  byte]); the lowest cloud layer's ONAM speed scrolls the mask exactly as it scrolls that
+  layer of the sky; the wind (WTHR wind speed, a script's SetWindDirection, `tree.rs
+  wind_vector`) drifts it 600 units a second at full strength. The darkening is scaled by
+  the sunlight colour's luminance against the ambient's and by the sun's height, so it
+  fades out at night and indoors, where a cloud takes no sunlight away. Weather fades
+  blend the two weathers' coverages.
+- Physically the sun's shadow term would be the right place (only the direct light is
+  blocked), but every material's lighting goes through Bevy's `apply_pbr_lighting`; a
+  view-level cloud mask there would need a binding on every lit pipeline and a fetch in
+  all of them even when off. Like the ambient occlusion, this is a post multiply; its
+  strength is kept low and follows the sun's share so the ambient's darkening stays small.
+- Cost: one full-screen pass, one depth load and one texture fetch a pixel: about
+  0.25-0.4 ms at 1280x800 [hypothesis, to be measured]. It does not run while off or at
+  night. Picture: the mask is NVForever's own coarse noise, not the game's cloud textures
+  (their world-space mapping is not known, world.md §6); a correct picture has soft,
+  world-anchored patches that drift with the wind, none at night, and a picture that is
+  identical with the switch off.
 
 ## 4. Tried and dropped
 

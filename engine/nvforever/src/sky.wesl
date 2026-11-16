@@ -34,6 +34,18 @@ struct SkyLight {
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var glare_texture: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(104) var glare_sampler: sampler;
 
+// Cloud upgrade (`--cloud-upgrade`, sky.rs "Cloud upgrade"; zeros when off): denser cloud
+// layers from the same textures, and their bases blended into the weather's fog.
+struct SkyUpgrade {
+    // x: 1 when the cloud upgrade is on; y: the density exponent; z: the fog's share at
+    // the horizon; w unused.
+    params: vec4<f32>,
+    // rgb: the weather's fog colour (linear) at the horizon; w unused.
+    fog: vec4<f32>,
+}
+
+@group(constants::MATERIAL_BIND_GROUP) @binding(105) var<uniform> upgrade: SkyUpgrade;
+
 // A texture spread over the angular square of half-size atan(half_tan) around the sun
 // (as on a billboard facing the camera), added as colour × alpha.
 fn sun_texel(t: texture_2d<f32>, s: sampler, dir: vec3<f32>, half_tan: f32) -> vec3<f32> {
@@ -93,6 +105,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             add += sky.sun.rgb * sun_texel(sun_texture, sun_sampler, dir, sky.sun.w);
         }
         c = vec4(c.rgb + add, c.a);
+    }
+    if upgrade.params.x > 0.5 {
+        // Cloud upgrade: lift the thin parts of the cloud alpha so the layers read
+        // denser, keeping the solid cores and the soft in-between (a' = 1 - (1 - a)^y).
+        c.a = 1.0 - pow(max(1.0 - c.a, 0.0), upgrade.params.y);
+        // Soften the bases into the weather's haze near the horizon: the low cloud layers
+        // take on part of the fog colour, so their edges disappear into the distance
+        // rather than ending as a line.
+        let dir = normalize(in.world_position.xyz - view.world_position.xyz);
+        let low = 1.0 - smoothstep(0.02, 0.30, dir.y);
+        c.rgb = mix(c.rgb, upgrade.fog.rgb, low * upgrade.params.z);
     }
     var out: FragmentOutput;
     let alpha_mode = pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;

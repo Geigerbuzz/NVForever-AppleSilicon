@@ -160,6 +160,7 @@ mod setup;
 mod shadow_probe;
 mod shadow_rate;
 mod shadow_thin;
+mod cloud_shadows;
 mod shafts;
 mod imagespace;
 mod imposters;
@@ -339,6 +340,11 @@ struct Args {
     /// adapters, an interior cell's own image space), for comparisons.
     #[arg(long)]
     no_grade: bool,
+    /// Cloud upgrade: denser, softer cloud layers made from the game's own cloud textures
+    /// (an alpha lift, a second offset draw of each layer and a fog blend at the horizon;
+    /// sky.rs "Cloud upgrade"), off by default. No new art; no preset changes it.
+    #[arg(long)]
+    cloud_upgrade: bool,
     /// Put an image space modifier on the screen, by Editor ID or 0xFormID, for looking
     /// at one outside the scripts that play it: an animated one plays again and again, a
     /// second apart; with `@<seconds>` it is held at that time after its start
@@ -370,6 +376,12 @@ struct Args {
     /// shadow_thin.rs); 0, the default, lets everything cast as far as the shadows reach.
     #[arg(long, default_value_t = shadow_thin::DEFAULT_RATIO)]
     shadow_thin: f32,
+    /// Cloud shadows: coarse, moving patches of shade from the weather's clouds over the
+    /// ground and objects, as strong as the weather's cloud coverage and sunlight
+    /// ("cloud_shadows.rs"; off by default). A screen-space multiply after the
+    /// anti-aliasing and before bloom; it adds a pass only while on.
+    #[arg(long)]
+    cloud_shadows: bool,
     /// Samples per pixel for anti-aliasing: 1 (off), 2, 4 or 8. The cut-out edges of
     /// alpha-tested shapes (plants, fences, hair, grass) are smoothed with it too, like
     /// the game's transparency multisampling; with 1 they are tested per pixel.
@@ -1551,10 +1563,13 @@ fn main() -> AppExit {
     .add_plugins(draw_distance::DrawDistancePlugin(draw_distance::DrawDistances::new(&args)))
     // Small objects far away cast no sun shadows (shadow_thin.rs).
     .add_plugins(shadow_thin::ShadowThinPlugin(args.shadow_thin))
+    // Cloud shadows on the ground and objects (`--cloud-shadows`, off by default).
+    .add_plugins(cloud_shadows::CloudShadowsPlugin::new(args.cloud_shadows))
     .add_plugins(shadow_rate::ShadowRatePlugin { performance: performance_shadows })
     // Interiors draw the rooms seen through portals only (rooms.rs).
     .add_plugins(rooms::RoomsPlugin { off: args.no_room_culling, planes_off: args.no_occlusion_planes, planes_outdoors: args.occlusion_planes_outdoors })
     .insert_resource(ClearColor(Color::srgb(0.62, 0.72, 0.85)))
+    .insert_resource(sky::CloudUpgrade(args.cloud_upgrade))
     .insert_resource(GlobalAmbientLight { brightness: 600.0, ..default() })
     .insert_resource(sky_state)
     .insert_resource(screen_modifiers)
