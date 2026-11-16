@@ -194,7 +194,11 @@ const SURFACE_BAKE_SHADER: Handle<Shader> = uuid_handle!("6da97f8c-732c-4697-b34
 /// do (nvf_assets nif_material.rs "Bindless"), so quadrants still draw in one batch.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 #[data(50, TerrainLayersUniform, binding_array(101))]
-#[bindless(limit(512), index_table(range(50..64), binding(100)))]
+// Same budget as `NifSurface` (nvf_assets `nif_material.rs`): 13 textures × 512 does not fit
+// Apple's 1024 `max_binding_array_sampler_elements_per_shader_stage`, so the terrain lost
+// bindless there too. 13 × 64 = 832 fits. Windows and Linux keep 512.
+#[cfg_attr(target_vendor = "apple", bindless(limit(64), index_table(range(50..64), binding(100))))]
+#[cfg_attr(not(target_vendor = "apple"), bindless(limit(512), index_table(range(50..64), binding(100))))]
 #[bind_group_data(TerrainLayersKey)]
 pub struct TerrainLayers {
     /// [design] Dedicated unlit surface capture of a folded base, terrain_surface.rs

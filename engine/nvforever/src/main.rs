@@ -1608,6 +1608,21 @@ fn main() -> AppExit {
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(ms / 1000.0)));
         app.add_systems(Startup, move || info!("fixed frame time: every frame {ms} ms (NVF_FIXED_FRAME_TIME_MS)"));
     }
+    // NVF_TEST_RUN_UNFOCUSED=1: keep rendering at full rate while the window is not the
+    // frontmost one, so frame measurements and screenshots do not depend on who has focus.
+    // Bevy's default unfocused mode is `ReactiveLowPower`, which drops a backgrounded window
+    // to a few frames a second; on macOS that means a screenshot taken while the player works
+    // elsewhere is of an unrendered frame. A test aid, not a setting. It is applied after
+    // start-up so that `WinitPlugin`'s own `WinitSettings` cannot put itself back.
+    if std::env::var("NVF_TEST_RUN_UNFOCUSED").is_ok_and(|v| v.trim() == "1") {
+        app.add_systems(PostStartup, |mut settings: ResMut<bevy::winit::WinitSettings>| {
+            *settings = bevy::winit::WinitSettings {
+                focused_mode: bevy::winit::UpdateMode::Continuous,
+                unfocused_mode: bevy::winit::UpdateMode::Continuous,
+            };
+            info!("test aid NVF_TEST_RUN_UNFOCUSED: the game keeps rendering while unfocused");
+        });
+    }
     // Asks for VK_AMD_anti_lag or VK_NV_low_latency2 when Bevy creates the device: before
     // DefaultPlugins (anti_lag.rs, nv_low_latency.rs).
     app.add_plugins(anti_lag::AntiLagInitPlugin);
