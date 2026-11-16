@@ -192,11 +192,13 @@ unknown; do not guess them.
   IsDLCInstalled (0x126F), SwapTexture (0x1269). Their behaviour is undocumented. Treat
   them as `[hypothesis]` from their names until observed in game.
 
-**Anomaly** [observed]: `GetInCharGen` compiles to 0x127F in three Old World Blues scripts
-and to 0x127C in one (OldWorldBlues.esm SCPT 0x010154E8). 0x127C is the only unresolved
-opcode. A possible cause is a script compiled against an older command table, or source
-edited after compiling [hypothesis]. The runtime should dispatch on opcode, not name, so
-treat 0x127C as unknown until a source explains it.
+**An older opcode** [observed]: `GetInCharGen` compiles to 0x127F in three Old World Blues
+scripts and to 0x127C in one (OldWorldBlues.esm SCPT 0x010154E8). That script's shipped
+source says `If ( GetInCharGen == 1 )` and its SCDA calls 0x127C, so the pairing is not an
+alignment accident; a compiler on an older command table is the likely cause [hypothesis].
+The catalogue keeps both numbers on the function (`opcodes: ["0x127F", "0x127C"]`, the
+current one first), so the runtime dispatches 0x127C as `GetInCharGen` too and the decoder
+names it. No unresolved opcode is left in the masters.
 
 Conditions: CTDA stores the same index as a u16 at byte 8 [documented: xEdit]. The
 masters use 138 distinct vanilla condition functions in 80,333 conditions. The runtime
@@ -221,6 +223,10 @@ Top level: `sources`, `scan` (alignment statistics), `statement_opcodes`, `begin
 | `observed_spellings` | undocumented spellings in shipped source | observed |
 | `summary`, `notes[]`, `bugs[]` | our paraphrase of the wiki page; `bugs` = original-engine quirks reported there | documented (paraphrased) |
 | `categories`, `console_only`, `wiki_condition_func` | wiki metadata | documented |
+
+A function with more than one opcode lists the current command table's first, which is what
+`by_name` gives the compiler; an older number the shipped bytecode also uses follows it
+(GetInCharGen: 0x127F, then 0x127C).
 
 The wiki's argument types are free-form (`0/1`, `x/y/z`, `StatName`, `baseform`, …).
 `kind` is a rough grouping; the bytecode encoding (§3.2) is what decides.
@@ -257,7 +263,7 @@ The wiki's argument types are free-form (`0/1`, `x/y/z`, `StatName`, `baseform`,
   reading the bytecode back (a valid observation, but the owner decides).
 - ~~The 10 scripts whose line count does not match~~: lines without a letter or digit
   produce no statement; each script is explained in scripts.md §3.4. The GetInCharGen
-  anomaly (§4) stays open: the decoder keeps 0x127C as an unknown opcode.
+  anomaly is resolved (§4): 0x127C is its older opcode, catalogued beside 0x127F.
 - Block names for the unused event codes 0x0B, 0x0D, 0x0E and 0x1D.
 - ~~A Rust reader for this format~~: `crates/fnv-script` (Layer 5, scripts.md).
 - Parameter lists the wiki leaves out: ShowCaravanMenu, SetNPCRadio, StartCannibal,

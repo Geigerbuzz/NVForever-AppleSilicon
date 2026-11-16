@@ -213,5 +213,29 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("| ref.[FrobWidget]", sf.render_md(doc))
 
 
+class OlderOpcodes(unittest.TestCase):
+    def test_get_in_chargen_keeps_its_older_opcode(self):
+        # OldWorldBlues SCPT 0x010154E8's source says `If ( GetInCharGen == 1 )` and its
+        # bytecode calls 0x127C; the three other scripts call 0x127F.
+        canon = {"getinchargen": "getinchargen"}
+        scan = {"top": {0x127F: {"GetInCharGen": 3}}, "expr": {},
+                "calls": {0x127C: 1, 0x127F: 3},
+                "scripts": {0x127C: 1, 0x127F: 3},
+                "begin": {}, "statements": {}, "ctda": {}, "stats": {}}
+        resolved, _, _, _ = sf.resolve_opcodes(scan, canon, {})
+        self.assertEqual(resolved, {0x127C: "getinchargen", 0x127F: "getinchargen"})
+        wiki = [{"name": "GetInCharGen", "page": "GetInCharGen", "origin": "VEGAS1",
+                 "categories": []}]
+        doc = sf.build(wiki, scan, {}, {})
+        row = doc["functions"][0]
+        # The current command table's number first: the compiler's by_name picks it.
+        self.assertEqual(row["opcodes"], ["0x127F", "0x127C"])
+        self.assertEqual(row["script_calls"], 4)
+        self.assertEqual(row["scripts_using"], 4)
+        self.assertEqual(doc["unresolved_opcodes"], [])
+        self.assertEqual(doc["anomalies"], [
+            {"function": "GetInCharGen", "opcodes": ["0x127F", "0x127C"]}])
+
+
 if __name__ == "__main__":
     unittest.main()

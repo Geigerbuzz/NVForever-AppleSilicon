@@ -2573,6 +2573,21 @@ fn is_actor_detected_reuses_overwrite_forget_and_owner_expiry() {
 }
 
 #[test]
+fn get_in_chargen_reads_the_state_and_answers_its_older_opcode_too() {
+    let f = fixture();
+    let mut g = game(&f);
+    // SetInCharGen's flag is the state the wiki says GetInCharGen returns.
+    assert_eq!(call(&mut g, 0x127F, None, &[]), 0.0);
+    assert_eq!(call(&mut g, 0x127C, None, &[]), 0.0);
+    call(&mut g, 0x10E7, None, &[n(1.0)]);
+    assert_eq!(call(&mut g, 0x127F, None, &[]), 1.0);
+    assert_eq!(call(&mut g, 0x127C, None, &[]), 1.0, "the OWB script's older opcode");
+    call(&mut g, 0x10E7, None, &[n(0.0)]);
+    assert_eq!(call(&mut g, 0x127F, None, &[]), 0.0);
+    assert_eq!(call(&mut g, 0x127C, None, &[]), 0.0);
+}
+
+#[test]
 fn is_actor_detected_restore_is_cold_until_actual_remeasurement() {
     let f = fixture();
     let mut g = game(&f);

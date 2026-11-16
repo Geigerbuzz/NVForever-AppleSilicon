@@ -348,12 +348,22 @@ fn unknown_bytes_are_kept_raw_and_counted() {
 #[test]
 fn unknown_opcode_decodes_with_tagged_values() {
     let t = table();
-    let bytes = st(0x127C, &params(1, &n(1)));
+    let bytes = st(0x127E, &params(1, &n(1)));
     let d = run(&t, &bytes);
     assert_eq!(d.report.raw_total(), 0);
     assert_eq!(d.report.issues[0].kind, "unknown_opcode");
     let u = unit(&[], vec![], bytes);
-    assert_eq!(text(&t, &u, &d), ["#0x127c 1"]);
+    assert_eq!(text(&t, &u, &d), ["#0x127e 1"]);
+}
+
+#[test]
+fn the_older_get_in_chargen_opcode_decodes_by_name() {
+    let t = table();
+    let bytes = st(0x127C, &[]);
+    let d = run(&t, &bytes);
+    assert!(d.report.issues.iter().all(|i| i.kind != "unknown_opcode"));
+    let u = unit(&[], vec![], bytes);
+    assert_eq!(text(&t, &u, &d), ["getinchargen"]);
 }
 
 #[test]
@@ -376,6 +386,10 @@ fn table_lookups() {
     assert_eq!(t.block_name(0x1A), Some("OnTriggerEnter"));
     assert_eq!(t.enum_name("actor_value", 57), Some("Assistance"));
     assert_eq!(t.enum_name("anim_group", 3), Some("Forward"));
+    // GetInCharGen's current opcode is what the compiler emits; the older 0x127C its
+    // OWB caller carries is known too (docs/spec-notes/script-functions.md §4).
+    assert_eq!(t.by_name("GetInCharGen"), Some(0x127F));
+    assert_eq!(t.get(0x127C).map(|f| f.name.as_str()), Some("GetInCharGen"));
     // Every opcode listed in the encodings exists in the catalogue (checked at load).
     for f in t.functions.values() {
         assert!(f.opcode >= 0x1000);

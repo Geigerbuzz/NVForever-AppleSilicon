@@ -1009,7 +1009,7 @@ fn console_functions_are_opcodeless_console_functions_of_the_catalogue() {
 }
 
 #[test]
-fn extender_functions_are_extender_rows_of_the_catalogue_and_names_are_unique() {
+fn extender_functions_are_extender_rows_of_the_catalogue_and_a_name_is_one_function() {
     let (_, j) = catalogue();
     let rows = j["functions"].as_array().unwrap();
     let family = |name: &str| {
@@ -1018,13 +1018,28 @@ fn extender_functions_are_extender_rows_of_the_catalogue_and_names_are_unique() 
     for (name, _) in fnv_game::functions::ext_registry() {
         assert_eq!(family(name), Some("extender"), "{name}: not an extender function of functions.json");
     }
-    let f = fnv_game::functions::registry().iter().map(|r| r.1);
-    let named = fnv_game::functions::console_registry().iter().chain(fnv_game::functions::ext_registry()).map(|r| r.0);
-    let mut names: Vec<String> = f.chain(named).map(str::to_ascii_lowercase).collect();
-    let n = names.len();
-    names.sort();
-    names.dedup();
-    assert_eq!(names.len(), n, "a name is registered twice");
+    // A function may have more than one opcode (GetInCharGen's older 0x127C and its
+    // current 0x127F): one name twice is only a fault when the entries are different
+    // functions.
+    fn same_kind(a: &fnv_game::functions::Kind, b: &fnv_game::functions::Kind) -> bool {
+        use fnv_game::functions::Kind;
+        match (a, b) {
+            (Kind::Impl(x), Kind::Impl(y)) => std::ptr::fn_addr_eq(*x, *y),
+            (Kind::Stub(x), Kind::Stub(y)) | (Kind::NoOp(x), Kind::NoOp(y)) => x == y,
+            _ => false,
+        }
+    }
+    let game = fnv_game::functions::registry().iter().map(|r| (r.1, r.2));
+    let named = fnv_game::functions::console_registry().iter().chain(fnv_game::functions::ext_registry()).map(|r| (r.0, r.1));
+    let mut seen: Vec<(&str, fnv_game::functions::Kind)> = Vec::new();
+    for (name, kind) in game.chain(named) {
+        let prev = seen.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|&(_, k)| k);
+        if let Some(prev) = prev {
+            assert!(same_kind(&prev, &kind), "{name} is registered twice with different functions");
+        } else {
+            seen.push((name, kind));
+        }
+    }
     // By name, any case, reaches the same entry as by opcode.
     let by_name = fnv_game::functions::lookup_name("setstage").map(|k| k as *const _);
     assert_eq!(by_name, fnv_game::functions::lookup(0x1039).map(|k| k as *const _));

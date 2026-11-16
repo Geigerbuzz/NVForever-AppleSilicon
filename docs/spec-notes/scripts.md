@@ -165,8 +165,8 @@ script-functions.md §7 "parameter encodings beyond r/n"]:
 
 `crates/fnv-script/data/encodings.json` (`fnv.script.encodings/1`) lists the 35
 functions with a parameter that is not a value, with the spellings of the enum codes the
-shipped source uses. Every other function called by shipped scripts (319 functions, plus
-the unknown opcode 0x127C) decodes with values only [observed]. The functions and calls (statement + expression calls):
+shipped source uses. Every other function called by shipped scripts (319 functions)
+decodes with values only [observed]. The functions and calls (statement + expression calls):
 
 - **axis**: Rotate 4, GetPos 82, SetPos 148, GetAngle 10, SetAngle 50.
 - **enum, actor value**: GetActorValue 515, SetActorValue 730, ModActorValue 62,
@@ -270,9 +270,9 @@ Markers without a matching If are accepted by the compiler and kept in place
 How the original engine runs these markers is open [hypothesis: an EndIf with nothing
 open does nothing; a marker reached at the end of a taken branch ends the chain].
 
-Opcode 0x127C (one call, OldWorldBlues SCPT 0x030154E8, source `GetInCharGen`) has no
-function in the table (script-functions.md §4 anomaly). It decodes as a call with the
-unknown opcode and value parameters.
+Opcode 0x127C (one call, OldWorldBlues SCPT 0x030154E8, source `GetInCharGen`) is
+`GetInCharGen`'s older number: the catalogue keeps it beside the current 0x127F
+(script-functions.md §4), so it decodes as a named call with no parameters.
 
 ### 2.7 Decoder report
 
@@ -348,7 +348,7 @@ Everything is lower-case except FormIDs.
 
 Atoms:
 - **function**: the catalogue name of the opcode (`functions.json` `name`), lower-case
-  (`setav` prints `setactorvalue`); an opcode not in the table prints `#0x127c`.
+  (`setav` prints `setactorvalue`); an opcode not in the table prints `#0x127e`.
 - **reference list entry**: the load-order FormID `0x%08X` of an `SCRO`; the variable
   name of an `SCRV`.
 - **local variable**: its declared name; **global**: the GLOB's FormID; **another
@@ -458,7 +458,7 @@ the decoder's reading is the bytes' [observed, each checked]:
 | 32 | The catalogue documents fewer parameters than the function takes, so the oracle cuts real arguments: ShowCaravanMenu (wiki: none; compiled with 3), SetNPCRadio (1; compiled with 2), StartCannibal, EnableLoadingMenu, Unlock (none; compiled with 1). A gap in `functions.json`, not in the decoder. |
 | 7 | The form was renamed after the script was compiled; the reference list keeps the FormID, the source the old Editor ID: DeadMoney QUST 0x01013AA5 stage 21 (NVDLC01DeanPlayerChairREF), DeadMoney SCPT 0x0100636B (HologramStopPackage), FalloutNV REFR 0x001551B2 and 0x001551B3 patrols (TenofSpades/BetsyArrivalMarker), HonestHearts SCPT 0x0200B667 (NVDLC02SorrowMQ05REF), 0x0200F8EF (NVDLC02JoshuaGrahamLeaveForceGreetPackage), OldWorldBlues SCPT 0x0300D592 (NVDLC03SinkNukaColaMachineMsg). |
 | 2 | Compiled against an older version of another script (§2.5): FalloutNV SCPT 0x00127959, LonesomeRoad SCPT 0x0400AC93. |
-| 1 | Opcode 0x127C where the source says GetInCharGen (§2.6): OldWorldBlues SCPT 0x030154E8. |
+| 1 | GetInCharGen's older opcode, 0x127C where the source says GetInCharGen (§2.6): OldWorldBlues SCPT 0x030154E8. |
 | 1 | An argument to a Begin block that takes none (`begin ScriptEffectStart EncHArchimedesEffect`, FalloutNV SCPT 0x0011F676), dropped by the compiler. |
 | 1 | A fourth argument to AddItem after a quoted `"*"` (FalloutNV INFO 0x0014DDD7 end); the compiler kept two. |
 
@@ -553,9 +553,9 @@ function does. Tests run the VM in strict mode; the game runs it in lenient mode
 - **Return ends the script for this run**, not just its block: a later block of the same
   event does not run [documented: GECK wiki Adding an Options Menu, owner export 2026-10-09; script-language.md
   §7.3 row 2, which lists the five shipped units where this can matter].
-- **Unknown opcodes** (not in `functions.json`; one in the masters, 0x127C, §2.6) and
-  `Raw` pieces: strict runs fail; lenient runs skip the call (value 0) and trace
-  `skipped`.
+- **Unknown opcodes** (not in `functions.json`; none in the masters now that 0x127C is
+  GetInCharGen's older number, §2.6) and `Raw` pieces: strict runs fail; lenient runs skip
+  the call (value 0) and trace `skipped`.
 - **Step budget**: each statement and call counts; a run stops after
   `RunOpts::max_steps` (100,000) with a `script_error`. Scripts have no loops, so only a
   runaway chain through the host (a stage result setting stages) can reach it. Nested

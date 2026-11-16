@@ -144,7 +144,7 @@ shipped source:
 | 2 | Compiled against an older version of another script (scripts.md §2.5): FalloutNV SCPT 0x00127959, LonesomeRoad SCPT 0x0400AC93. |
 | 8 | DeadMoney INFO result scripts (0x0101136F, 0x01011369, 0x01010D0B–0x01010D10, begin) write `s` (short) to `iL1`…`iL8`, which the target script now declares `float`. Compiled against an older version too. |
 | 3 | `player` and `PlayerREF` take each other's entries compared with source order: FalloutNV SCPT 0x0015725D, DeadMoney SCPT 0x01010DD9, 0x0100E883 (§3 rule 8). |
-| 1 | Opcode 0x127C where the source says GetInCharGen (scripts.md §2.6): OldWorldBlues SCPT 0x030154E8. |
+| 1 | GetInCharGen's older opcode, 0x127C where the source says GetInCharGen (scripts.md §2.6): OldWorldBlues SCPT 0x030154E8. |
 | 1 | A fourth argument to AddItem after a quoted `"*"`, which the editor dropped (FalloutNV INFO 0x0014DDD7 end) [hypothesis: an argument that is not a value ends the list; one case]. |
 
 Golden: `python tools/capture/oracle_script.py compiled <Data> <the ten masters> -o

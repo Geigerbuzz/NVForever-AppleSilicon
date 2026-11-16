@@ -507,6 +507,10 @@ pub fn registry() -> &'static [(u16, &'static str, Kind)] {
             (0x126C, "RemoveRecurringFromChallenge", Impl(player::remove_recurring_from_challenge)),
             (0x10E7, "SetInCharGen", Impl(player::set_in_chargen)),
             (0x127F, "GetInCharGen", Impl(player::get_in_chargen)),
+            // The older command table's number for GetInCharGen: OldWorldBlues SCPT
+            // 0x010154E8's source says `If ( GetInCharGen == 1 )` and its bytecode calls
+            // 0x127C (the three other scripts call 0x127F). script-functions.md §4.
+            (0x127C, "GetInCharGen", Impl(player::get_in_chargen)),
             (0x125C, "GetCasinoWinningsLevel", Impl(player::get_casino_winnings_level)),
             (0x1262, "GetCasinoWinningStage", Impl(player::get_casino_winnings_level)),
             (0x1229, "SetPCCanUsePowerArmor", Impl(player::set_pc_can_use_power_armor)),

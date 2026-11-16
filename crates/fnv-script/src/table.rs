@@ -389,6 +389,8 @@ impl FunctionTable {
     }
 
     /// Opcode of a function by name, alias or observed spelling (case-insensitive).
+    /// A function the catalogue gives more than one opcode gives its first, the current
+    /// command table's (GetInCharGen's 0x127F, not its older 0x127C).
     pub fn by_name(&self, name: &str) -> Option<u16> {
         self.by_name.get(&name.to_ascii_lowercase()).copied()
     }

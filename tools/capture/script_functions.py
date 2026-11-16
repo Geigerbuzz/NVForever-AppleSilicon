@@ -921,11 +921,22 @@ def canonical_map(wiki, xedit):
 
 MIN_SPELLING_USES = 3   # an undocumented spelling needs this many aligned call lines
 
+# Opcodes the shipped bytecode uses for a function the current command table gives another
+# number. 0x127C is GetInCharGen in older builds: OldWorldBlues SCPT 0x010154E8's source
+# says `If ( GetInCharGen == 1 )` and its SCDA calls 0x127C, while the three other scripts
+# that ask it call 0x127F (script-functions.md §4).
+OPCODE_ALIASES = {0x127C: "getinchargen"}
+
 
 def resolve_opcodes(scan, canon, xedit):
     """Opcode -> function key, plus spellings, undocumented names and leftovers."""
     resolved, spellings, extra, conflicts = {}, collections.defaultdict(collections.Counter), {}, []
-    for op in sorted(set(scan["top"]) | set(scan["expr"])):
+    ops = set(scan["top"]) | set(scan["expr"])
+    ops |= set(OPCODE_ALIASES) & set(scan["calls"])
+    for op in sorted(ops):
+        if op in OPCODE_ALIASES and op not in scan["top"] and op not in scan["expr"]:
+            resolved[op] = OPCODE_ALIASES[op]
+            continue
         known, unknown = collections.Counter(), collections.Counter()
         shown = {}
         for tok, c in scan["top"].get(op, {}).items():
@@ -1001,7 +1012,10 @@ def build(wiki, scan, xedit, notes):
             e["condition_index"] = xi[0]
             e["xedit_param_types"] = xi[1]
         if ops:
-            e["opcodes"] = [f"0x{o:04X}" for o in sorted(ops)]
+            # The current command table's number first (the one by_name gives the
+            # compiler); an older number the bytecode also uses comes after it
+            # (GetInCharGen 0x127F, then its older 0x127C).
+            e["opcodes"] = [f"0x{o:04X}" for o in sorted(ops, key=lambda o: (o in OPCODE_ALIASES, o))]
             e["opcode_evidence"] = "observed"
             if len(ops) > 1:
                 anomalies.append({"function": e["name"], "opcodes": e["opcodes"]})
