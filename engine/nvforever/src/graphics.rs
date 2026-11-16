@@ -485,7 +485,7 @@ impl Plugin for GraphicsPlugin {
             app.init_resource::<nvf_play::phys_load::PhysLoad>();
             // (time in this period, time counted, slowest, frames counted, cycle index)
             #[allow(clippy::type_complexity)]
-            app.add_systems(Update, move |mut commands: Commands, time: Res<Time<Real>>, mut g: ResMut<Graphics>, sky: Res<SkyState>, store: Res<bevy::diagnostic::DiagnosticsStore>, lights: Query<(Option<&Name>, &DirectionalLight, &bevy::camera::visibility::CascadesVisibleEntities)>, views: Query<Option<&Name>, With<Camera>>, mut acc: Local<(f32, f32, f32, u32, usize)>, mut start_shadows: Local<Option<(bool, f32, usize, f32)>>, thin: Res<crate::shadow_thin::ShadowThin>, refs: Query<&nvf_play::RefVisual>, mut phys_load: ResMut<nvf_play::phys_load::PhysLoad>| {
+            app.add_systems(Update, move |mut commands: Commands, mut g: ResMut<Graphics>, sky: Res<SkyState>, store: Res<bevy::diagnostic::DiagnosticsStore>, lights: Query<(Option<&Name>, &DirectionalLight, &bevy::camera::visibility::CascadesVisibleEntities)>, views: Query<Option<&Name>, With<Camera>>, mut acc: Local<(f32, f32, f32, u32, usize)>, mut start_shadows: Local<Option<(bool, f32, usize, f32)>>, mut wall: Local<Option<std::time::Instant>>, thin: Res<crate::shadow_thin::ShadowThin>, refs: Query<&nvf_play::RefVisual>, mut phys_load: ResMut<nvf_play::phys_load::PhysLoad>| {
                 let first = start_shadows.is_none();
                 let start = *start_shadows.get_or_insert((sky.shadows, sky.shadow_distance, sky.shadow_cascades, thin.ratio));
                 if first {
@@ -493,7 +493,13 @@ impl Plugin for GraphicsPlugin {
                         apply_shadow_step(&mut commands, &sky, start, step);
                     }
                 }
-                let dt = time.delta_secs();
+                // Wall clock, not `Time<Real>`: `NVF_FIXED_FRAME_TIME_MS` moves `Time<Real>` on
+                // by its value every frame whatever the frame took (main.rs), so a frame-time
+                // aid reading it measures the forced value and calls every hitch 8.33 ms.
+                // The aid's whole purpose is the real interval between frames.
+                let now = std::time::Instant::now();
+                let dt = wall.map_or(0.0, |at| now.duration_since(at).as_secs_f32());
+                *wall = Some(now);
                 acc.0 += dt;
                 if acc.0 > 0.5 || ft.cycle.is_empty() {
                     acc.1 += dt;

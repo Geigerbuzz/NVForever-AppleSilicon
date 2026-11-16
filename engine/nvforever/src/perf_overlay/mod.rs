@@ -28,9 +28,10 @@
 //! begins ([`readings::Frames::note_generated`]). Not in the original [engineering choice,
 //! issue #1087].
 //!
-//! The times are wall-clock (`Time<Real>`), so a paused game or a slowed clock still
-//! reads the frame rate the player sees. The text changes twice a second so it can be
-//! read ([`readings::WINDOW`]).
+//! The times are wall-clock (`Instant`, not `Time<Real>`: `NVF_FIXED_FRAME_TIME_MS` moves
+//! `Time<Real>` on by its value every frame whatever the frame took, which would show as a
+//! perfect 8.33 ms), so a paused game or a slowed clock still reads the frame rate the
+//! player sees. The text changes twice a second so it can be read ([`readings::WINDOW`]).
 //!
 //! The log says the first readings of the first showing (`fps counter: first reading …`,
 //! `first usage reading …`, `first process reading …`, `first split reading …`, `first
@@ -249,14 +250,23 @@ fn follow_upscale(o: &mut Overlay, on: bool, now: impl FnOnce() -> Option<readin
 #[allow(clippy::too_many_arguments)]
 fn sample(
     counter: Res<FpsCounter>,
-    time: Res<Time<Real>>,
     generated: Option<Res<GeneratedFrames>>,
     budget: Option<Res<MemoryBudget>>,
     mut overlay: ResMut<Overlay>,
     timing: split::SplitInputs,
     counts: LoadedCounts,
     upscale: UpscaleInputs,
+    mut wall: Local<Option<std::time::Instant>>,
+    mut epoch: Local<Option<std::time::Instant>>,
 ) {
+    // Wall clock, not `Time<Real>`: with `NVF_FIXED_FRAME_TIME_MS` set, `Time<Real>` advances
+    // by the forced value every frame whatever the frame took (main.rs), and this row would
+    // then read the forced 8.33 ms as its rate, its 1 % low and its graph. The player's frame
+    // rate is the interval between frames.
+    let now = std::time::Instant::now();
+    let dt = wall.map_or(0.0, |at| now.duration_since(at).as_secs_f32());
+    *wall = Some(now);
+    let epoch = *epoch.get_or_insert(now);
     // Frame generation's count, noted every frame after the frame's time, the overlay
     // shown or not ([`readings::Frames::note_generated`]).
     let generated = generated_count(generated.as_deref());
@@ -270,7 +280,7 @@ fn sample(
     // The CPU row reads the machine's counter and the game's processor time, the RAM row
     // the game's working set: each asked for on its own.
     u.set_want(rows.cpu, rows.gpu, rows.cpu, rows.ram);
-    let due = overlay.step(&rows, time.delta_secs());
+    let due = overlay.step(&rows, dt);
     overlay.frames.note_generated(generated);
     // The upscaling row every frame, outside the half-second window.
     follow_upscale(&mut overlay, rows.upscale, || upscale.read());
@@ -294,7 +304,7 @@ fn sample(
         info!("fps counter: first reading {:.0} fps, {:.1} ms, slowest {:.1} ms, 1% low {:.1} ms", frame.fps, frame.mean_ms, frame.worst_ms, frame.low_ms);
     }
     if let Some(every) = log_every() {
-        let now = time.elapsed_secs_f64();
+        let now = epoch.elapsed().as_secs_f64();
         if o.last_log.is_none_or(|t| now - t >= every) {
             o.last_log = Some(now);
             info!("fps counter: {}", rows_log(&readings::rows(&o.readings, &rows)));

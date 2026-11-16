@@ -444,6 +444,7 @@ impl super::Device {
             features,
             counters: Default::default(),
             limits: limits.clone(),
+            staging_pool: parking_lot::Mutex::new(super::StagingPool::default()),
         }
     }
 
@@ -451,7 +452,11 @@ impl super::Device {
         raw: Retained<ProtocolObject<dyn MTLBuffer>>,
         size: wgt::BufferAddress,
     ) -> super::Buffer {
-        super::Buffer { raw, size }
+        super::Buffer {
+            raw,
+            size,
+            poolable: false,
+        }
     }
 
     pub fn raw_device(&self) -> &Retained<ProtocolObject<dyn MTLDevice>> {
@@ -465,6 +470,25 @@ impl crate::Device for super::Device {
     unsafe fn create_buffer(&self, desc: &crate::BufferDescriptor) -> DeviceResult<super::Buffer> {
         let map_read = desc.usage.contains(wgt::BufferUses::MAP_READ);
         let map_write = desc.usage.contains(wgt::BufferUses::MAP_WRITE);
+
+        // NVForever: wgpu's one-shot upload buffers (`Queue::write_buffer`, `write_texture`
+        // and the staging half of `create_buffer_init`) are created and destroyed every
+        // frame, and on Metal each one is a fresh driver allocation of shared, GPU-visible
+        // memory. A staging buffer is destroyed only after the submission that read it has
+        // completed, so a pooled one is free to hand out again.
+        let poolable = desc.memory_flags.contains(crate::MemoryFlags::TRANSIENT)
+            && map_write
+            && !map_read;
+        if poolable {
+            if let Some(raw) = self.staging_pool.lock().take(desc.size) {
+                self.counters.buffers.add(1);
+                return Ok(super::Buffer {
+                    raw,
+                    size: desc.size,
+                    poolable,
+                });
+            }
+        }
 
         let mut options = MTLResourceOptions::empty();
         options |= if map_read || map_write {
@@ -490,11 +514,18 @@ impl crate::Device for super::Device {
             Ok(super::Buffer {
                 raw,
                 size: desc.size,
+                poolable,
             })
         })
     }
-    unsafe fn destroy_buffer(&self, _buffer: super::Buffer) {
+    unsafe fn destroy_buffer(&self, buffer: super::Buffer) {
         self.counters.buffers.sub(1);
+        if buffer.poolable {
+            let capacity = buffer.raw.length() as u64;
+            if capacity <= super::STAGING_POOL_MAX_BYTES {
+                self.staging_pool.lock().put(capacity, buffer.raw);
+            }
+        }
     }
 
     unsafe fn add_raw_buffer(&self, _buffer: &super::Buffer) {

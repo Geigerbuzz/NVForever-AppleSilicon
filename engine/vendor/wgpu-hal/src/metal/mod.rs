@@ -637,6 +637,9 @@ pub struct Device {
     features: wgt::Features,
     counters: Arc<wgt::HalCounters>,
     limits: wgt::Limits,
+    /// NVForever: the one-shot upload buffers wgpu makes and destroys every frame are
+    /// reused from here instead of through a driver allocation each (see [`StagingPool`]).
+    staging_pool: Mutex<StagingPool>,
 }
 
 #[derive(Debug)]
@@ -840,10 +843,59 @@ impl crate::Queue for Queue {
     }
 }
 
+/// NVForever: how much shared staging memory the pool holds while idle.
+const STAGING_POOL_MAX_BYTES: u64 = 32 << 20;
+
+/// NVForever: a free list of wgpu's one-shot upload buffers.
+///
+/// `wgpu-core` creates a staging buffer for every `Queue::write_buffer`, `write_texture`
+/// and `create_buffer_init` (`StagingBuffer::new`, `memory_flags: TRANSIENT`), and on Metal
+/// each one is a fresh `newBufferWithLength` of shared, GPU-visible memory: a driver
+/// `malloc` of page-backed memory, 2-8 µs, plus ~1 µs to free, for about a hundred uploads
+/// a frame. `wgpu-core` destroys a staging buffer only when the submission that read it has
+/// completed (`EncoderInFlight::temp_resources`), so one handed back here is already free
+/// for the GPU and can be handed out again. Buckets tolerate a buffer up to twice the
+/// request so a 64-byte upload does not take a megabyte one.
+#[derive(Debug, Default)]
+struct StagingPool {
+    free: Vec<(u64, Retained<ProtocolObject<dyn MTLBuffer>>)>,
+    bytes: u64,
+}
+
+impl StagingPool {
+    /// A buffer of at least `size` bytes and at most twice that, or `None` to allocate one.
+    fn take(&mut self, size: u64) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
+        let limit = size.saturating_mul(2);
+        let index = self
+            .free
+            .iter()
+            .position(|&(capacity, _)| capacity >= size && capacity <= limit)?;
+        let (capacity, buffer) = self.free.swap_remove(index);
+        self.bytes -= capacity;
+        Some(buffer)
+    }
+
+    fn put(&mut self, capacity: u64, buffer: Retained<ProtocolObject<dyn MTLBuffer>>) {
+        if self.bytes + capacity > STAGING_POOL_MAX_BYTES {
+            return;
+        }
+        self.bytes += capacity;
+        self.free.push((capacity, buffer));
+    }
+}
+
+// SAFETY: `MTLBuffer` objects are thread-safe, and the pool is only reached through its
+// `Mutex`. Same reasoning as `Buffer`'s implementations below.
+unsafe impl Send for StagingPool {}
+unsafe impl Sync for StagingPool {}
+
 #[derive(Debug)]
 pub struct Buffer {
     raw: Retained<ProtocolObject<dyn MTLBuffer>>,
     size: wgt::BufferAddress,
+    /// Created with `crate::MemoryFlags::TRANSIENT` (wgpu's staging buffers): hand it back
+    /// to the device's [`StagingPool`] when it is destroyed rather than freeing it.
+    poolable: bool,
 }
 
 unsafe impl Send for Buffer {}

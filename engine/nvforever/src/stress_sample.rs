@@ -19,6 +19,11 @@
 //! and `stress actors: <n> drawn in <f> frames (<ms> ms, most in a frame <m> ms); those
 //! frames mean <m> ms, worst <w> ms, <k> over 100 ms`.
 //!
+//! At the exit, `stress tail: <a> frames over 8.34 ms, <b> over 12 ms, <c> over 16.67 ms,
+//! <d> over 33 ms of <n> seen frames; longest run over 8.34 ms <k>` says how big the run's
+//! tail is, where `stress frames:` says how slow its slowest hundredth is on average: a 1 %
+//! low of 12 ms can be every hundredth frame at 12 or one burst of 12.
+//!
 //! The frame measured (issue #1415): a frame is the time between two consecutive runs of
 //! the sampler in `First`, each run a frame boundary. Each boundary takes its own instant
 //! (`Instant::now()`), the phase it sees (start-up, behind a loading screen, seen), the
@@ -630,6 +635,30 @@ fn report(mut exit: MessageReader<AppExit>, s: Res<Samples>) {
         s.all.len(),
         s.hidden,
         s.crossed
+    );
+    // How big the tail is, not only how slow its slowest hundredth is: the frames of the
+    // run over a 120 Hz, 12 ms, 60 Hz and 30 Hz budget, and the longest run of frames over
+    // 8.34 ms. `stress frames:`'s 1 % low is a mean over a hundredth of the run and hides
+    // whether that was a burst or the whole run; this says which. Real frame times (the
+    // sampler's instants), so `NVF_FIXED_FRAME_TIME_MS` does not affect it.
+    let over = |ms: f32| s.all.iter().filter(|&&m| m > ms).count();
+    let (mut run, mut longest) = (0usize, 0usize);
+    for &m in &s.all {
+        if m > 8.34 {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    info!(
+        "stress tail: {} frames over 8.34 ms, {} over 12 ms, {} over 16.67 ms, {} over 33 ms of {} seen frames; longest run over 8.34 ms {}",
+        over(8.34),
+        over(12.0),
+        over(16.67),
+        over(33.0),
+        s.all.len(),
+        longest
     );
     let f = &s.actor_frames;
     let (drawn, ms) = f.iter().fold((0, 0.0), |(n, t), &(_, k, m)| (n + k, t + m));

@@ -3023,11 +3023,26 @@ pub fn per_view_shadow_pass<const IS_LATE: bool>(
 ) {
     let view_lights = view.into_inner();
 
+    let hold_directional = hold_directional.map_or(HoldDirectionalShadowMaps(0), |hold| *hold);
+    // A frame whose every directional cascade is held draws nothing here (the staggered
+    // schedule holds the middle and far ones most frames). `ctx.command_encoder()` below
+    // created and submitted an empty `MTLCommandBuffer` for it every frame: one more
+    // encoder to finish, one more commit in `Queue::submit` (a measured fixed cost of
+    // 0.1-0.15 ms), and one more entry in the submission's resource bookkeeping. Return
+    // before the encoder exists. A view light that is not a directional one (or whose
+    // cascade is unknown) counts as drawn, so point and spot shadow views never skip.
+    let draws_one = view_lights.lights.iter().copied().any(|e| match light_entities.get(e) {
+        Ok(LightEntity::Directional { cascade_index, .. }) => !hold_directional.holds(*cascade_index),
+        _ => true,
+    });
+    if !draws_one {
+        return;
+    }
+
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let time_span = diagnostics.time_span(ctx.command_encoder(), "per_view_shadow_pass");
 
-    let hold_directional = hold_directional.map_or(HoldDirectionalShadowMaps(0), |hold| *hold);
     for view_light_entity in view_lights.lights.iter().copied() {
         // NVForever held shadow maps: a held cascade's map keeps an earlier frame's picture.
         if let Ok(LightEntity::Directional { cascade_index, .. }) = light_entities.get(view_light_entity)

@@ -812,7 +812,12 @@ fn report(
     // A slow frame's own spans: those ended since the last report, whatever the thread.
     let now = Instant::now();
     let frame = FRAME.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
-    if let Some(at) = last.replace(now) {
+    let at = last.replace(now);
+    // The real interval, not `Time<Real>`: `NVF_FIXED_FRAME_TIME_MS` moves that clock on by
+    // its value every frame whatever the frame took (main.rs), which would make a window's
+    // `frame mean` the forced value rather than the frame's. The first frame has no before.
+    let real_dt = at.map_or_else(|| time.delta_secs(), |at| now.duration_since(at).as_secs_f32());
+    if let Some(at) = at {
         let ms = now.duration_since(at).as_secs_f64() * 1000.0;
         if ms >= hitch_ms() {
             let line = format!(
@@ -828,7 +833,7 @@ fn report(
             }
         }
     }
-    let dt = time.delta_secs();
+    let dt = real_dt;
     w.since += dt;
     w.frames += 1;
     w.frame_secs += dt;
