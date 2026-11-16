@@ -1,8 +1,7 @@
 //! Real compiled Game writes -> production lighting reader -> SkyState -> Projection.
 //! The source-only baseline adds a neutral reader seam, not a new lighting policy.
 use super::*;
-#[path = "../../../crates/fnv-game/tests/common/mod.rs"]
-mod lighting_build;
+use crate::authored_test_records as lighting_build;
 #[path = "../../../crates/fnv-game/tests/common/lighting_templates.rs"]
 mod fixtures;
 use fixtures::*;
@@ -25,9 +24,9 @@ fn sky() -> SkyState {
         fog_override: None, interior: None, interior_grade: None, shadows: false,
         shadow_distance: DEFAULT_SHADOW_DISTANCE, shadow_reach: 1.0,
         shadow_cascades: DEFAULT_SHADOW_CASCADES, grade: true, time_scale: 0.0,
-        clock_running: false, days_passed: 0.0, prev: None, fade: 1.0,
+        clock_running: false, days_passed: 0.0, keep_once: false, prev: None, fade: 1.0,
         choices: Vec::new(), image_space: None, adapters: HashMap::new(), changed: true,
-        script: None, pinned: false, regions: Vec::new(), source: None, placed: false,
+        script: None, pinned: false, regions: Vec::new(), source: None, placed: false, region_cell: None,
         clock_seen: false, sun_hour: None, rolled_for: None, pick: 0, rolls: 0,
         rng: DEFAULT_WEATHER_SEED, hour_index: None, live_globals: HashMap::new(),
         resume: None, flash: [0.0; 3], script_wind: None,

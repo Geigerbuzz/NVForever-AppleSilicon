@@ -34,6 +34,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub use fnv_world::alt_textures::AltTexture;
+mod attachment;
+pub use attachment::ModelObject;
 
 #[derive(Debug, Clone)]
 pub struct PreparedShape {
@@ -69,6 +71,9 @@ pub struct PreparedShape {
 
 #[derive(Debug, Clone, Default)]
 pub struct PreparedModel {
+    /// Source graph for `model_for_attachment`, from that same cached decode.
+    /// Ordinary/streamed models leave this empty.
+    pub objects: Vec<ModelObject>,
     pub shapes: Vec<PreparedShape>,
     /// The root node's own transform. A placed reference's transform replaces it, so
     /// world references draw shapes at `reference ∘ shape.transform`; geometry drawn
@@ -164,6 +169,82 @@ pub fn damage_stages_of(nodes: &[ModelNode], i: usize) -> Option<(i32, i32)> {
     out
 }
 
+/// A `NiBillboardNode` drawn as an entity of its own: its billboard mode and its rotation
+/// in the file. nvforever turns it towards the camera each frame (`world::face_camera`,
+/// docs/spec-notes/billboard-nodes.md): the glow cards of placed torches and fires, and
+/// those of the effect models.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct Billboard {
+    pub mode: u16,
+    pub bind: Quat,
+}
+
+/// The nearest billboard node at or above node `n` of `nodes` (`None`: under none, or
+/// the root itself).
+pub fn billboard_above(nodes: &[ModelNode], n: Option<usize>) -> Option<usize> {
+    let mut at = n;
+    while let Some(i) = at {
+        if nodes[i].billboard.is_some() {
+            return Some(i);
+        }
+        at = nodes[i].parent;
+    }
+    None
+}
+
+/// Node `n`'s transform from the model's root (the root's own excluded, as in
+/// [`PreparedShape::transform`]); `None`: the root, the identity.
+pub fn node_from_root(nodes: &[ModelNode], n: Option<usize>) -> Affine3A {
+    let mut m = Affine3A::IDENTITY;
+    let mut at = n;
+    while let Some(i) = at {
+        m = nodes[i].local * m;
+        at = nodes[i].parent;
+    }
+    m
+}
+
+/// The billboard nodes of a model drawn with its shapes baked (a placed model with no
+/// node hierarchy of its own: render streaming's static path, a reference enabled by
+/// script): each shape below a billboard node goes under an entity for that node, which
+/// carries [`Billboard`] and so can turn, instead of being baked in the file's pose
+/// (#2549). One per reference; a node's entity is made when a shape first needs it. A
+/// billboard node below another is turned alone, the outer one staying baked.
+#[derive(Default)]
+pub struct BakedBillboards {
+    made: HashMap<usize, Entity>,
+}
+
+impl BakedBillboards {
+    /// Where shape `s` of `model`, placed by `rt` under `parent`, goes: `None` when it is
+    /// under no billboard node (baked as before, `rt ∘ s.transform`); else the billboard
+    /// node's entity (made the first time, under a holder at `rt ∘` the node's parent from
+    /// the root) and the shape's transform below it. `tag` goes on the holder when it is
+    /// made: render streaming's static path gives it the reference's `RefVisual`, so that
+    /// what moves or redraws a reference by its drawn children of the cell (nvf-play
+    /// moved.rs `follow`, destroyed.rs `swap_models`) takes the billboard's shapes along.
+    pub fn place<B: Bundle>(&mut self, commands: &mut Commands, parent: Entity, model: &PreparedModel, rt: Affine3A, s: &PreparedShape, tag: B) -> Option<(Entity, Affine3A)> {
+        let b = billboard_above(&model.nodes, s.node)?;
+        let node = &model.nodes[b];
+        let e = *self.made.entry(b).or_insert_with(|| {
+            let above = rt * node_from_root(&model.nodes, node.parent);
+            let holder = commands.spawn((Transform::from_matrix(Mat4::from(above)), Visibility::Inherited, tag, ChildOf(parent))).id();
+            let t = Transform::from_matrix(Mat4::from(node.local));
+            commands.spawn((t, Visibility::Inherited, Billboard { mode: node.billboard.unwrap_or(0), bind: t.rotation }, ChildOf(holder))).id()
+        });
+        Some((e, node_from_root(&model.nodes, Some(b)).inverse() * s.transform))
+    }
+
+    /// How many billboard nodes were made.
+    pub fn len(&self) -> usize {
+        self.made.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.made.is_empty()
+    }
+}
+
 /// Where a light model's light sits, as a transform from the model's root: its node
 /// named `AttachLight` (or `AttachLight<n>`), with the nodes above it
 /// (docs/spec-notes/model-lights.md §4). `None`: no such node.
@@ -232,6 +313,8 @@ pub struct RigNode {
     /// Local transform in NIF (game) space.
     pub local: Transform,
     pub hidden: bool,
+    /// A `NiBillboardNode`: its billboard mode; spawned with a [`Billboard`].
+    pub billboard: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +427,15 @@ impl Rig {
         phase: f32,
         clip: Option<&Clip>,
     ) -> (Entity, Vec<Entity>, HashMap<String, Entity>) {
+        let (root, drawn, names, _) = self.spawn_indexed(commands, parent, transform, source, phase, clip);
+        (root, drawn, names)
+    }
+
+    /// The existing rig producer plus its exact node vector, independent of names.
+    pub fn spawn_indexed(
+        &self, commands: &mut Commands, parent: Entity, transform: Transform,
+        source: &str, phase: f32, clip: Option<&Clip>,
+    ) -> (Entity, Vec<Entity>, HashMap<String, Entity>, Vec<Entity>) {
         let entities: Vec<Entity> = self
             .nodes
             .iter()
@@ -351,7 +443,11 @@ impl Rig {
             .map(|(i, n)| {
                 let local = if i == 0 { transform } else { n.local };
                 let vis = if n.hidden { Visibility::Hidden } else { Visibility::Inherited };
-                commands.spawn((local, vis)).id()
+                let mut e = commands.spawn((local, vis));
+                if let Some(mode) = n.billboard.filter(|_| i > 0) {
+                    e.insert(Billboard { mode, bind: local.rotation });
+                }
+                e.id()
             })
             .collect();
         commands.entity(parent).add_child(entities[0]);
@@ -384,7 +480,7 @@ impl Rig {
             let idle = Arc::new(clip.map(|c| c.materials.clone()).unwrap_or_default());
             commands.entity(entities[0]).insert(RigMaterials { slots, idle, dark: false, fade: 1.0 });
         }
-        (entities[0], drawn, by_name)
+        (entities[0], drawn, by_name, entities)
     }
 }
 
@@ -1147,6 +1243,26 @@ impl ModelCtx<'_> {
         self.load(path, false)
     }
 
+    /// Attachment variant: capture node/property identities in the same decode as
+    /// geometry. Stored in the ordinary model cache/sweeper under its own key, so
+    /// ordinary world streaming does not retain an unused second scene graph.
+    pub fn model_for_attachment(&mut self, path: &str) -> Option<Arc<PreparedModel>> {
+        let path = fnv_vfs::normalize(path);
+        let key = format!("{}|attachment", model_key(&path, false, false, &[]));
+        if let Some(model) = self.cache.map.get(&key) { return model.clone(); }
+        let mut stores = Stores {
+            textures: StoreTextures { textures: &mut self.textures, data: &self.data, images: &mut self.images, formats: self.formats.as_deref() },
+            meshes: &mut self.meshes, materials: &mut self.materials,
+            bindposes: &mut self.bindposes, morphs: &mut self.cache.morphs,
+        };
+        let model = match crate::guard::guarded(|| prepare_unguarded(&mut stores, &path, false, false, &[], true)) {
+            Ok(model) => Some(Arc::new(model)),
+            Err(error) => { crate::guard::failed(&mut self.cache.failures, "model", format!("{key}: {error}")); None }
+        };
+        self.cache.map.insert(key, model.clone());
+        model
+    }
+
     /// Like [`Self::model`], also keeping a CPU copy of every shape's mesh (for code that
     /// derives new meshes from it later). Cached apart from the copy without CPU meshes.
     pub fn model_with_cpu(&mut self, path: &str) -> Option<Arc<PreparedModel>> {
@@ -1364,10 +1480,10 @@ impl ModelCtx<'_> {
 /// thread ([`Stores`]) or on a worker thread ([`Deferred`]).
 /// A panic while preparing is that model's failure, not the game's (guard.rs).
 fn prepare_into(sink: &mut impl ModelSink, path: &str, keep_cpu: bool, first_person: bool, swaps: &[AltTexture]) -> Result<PreparedModel, String> {
-    crate::guard::guarded(|| prepare_unguarded(sink, path, keep_cpu, first_person, swaps))
+    crate::guard::guarded(|| prepare_unguarded(sink, path, keep_cpu, first_person, swaps, false))
 }
 
-fn prepare_unguarded(sink: &mut impl ModelSink, path: &str, keep_cpu: bool, first_person: bool, swaps: &[AltTexture]) -> Result<PreparedModel, String> {
+fn prepare_unguarded(sink: &mut impl ModelSink, path: &str, keep_cpu: bool, first_person: bool, swaps: &[AltTexture], attachments: bool) -> Result<PreparedModel, String> {
     let game = sink.data().clone();
     let bytes = game.read(path).ok_or("not in any archive")?;
     let schema = game.schema.clone();
@@ -1381,6 +1497,7 @@ fn prepare_unguarded(sink: &mut impl ModelSink, path: &str, keep_cpu: bool, firs
     };
 
     let mut out = PreparedModel::default();
+    let mut shape_objects = HashMap::new();
     let (mut nodes, node_index) = model_nodes(&objects);
     for (block, i) in &node_index {
         if nodes[*i].billboard.is_some() {
@@ -1548,6 +1665,7 @@ fn prepare_unguarded(sink: &mut impl ModelSink, path: &str, keep_cpu: bool, firs
                     parent: o.parent.and_then(|p| index.get(&p).copied()),
                     local: if k == 0 { Transform::IDENTITY } else { to_bevy(&o.transform) },
                     hidden: k > 0 && hidden_self(*b),
+                    billboard: node_index.get(b).and_then(|&i| out.nodes[i].billboard),
                 }
             })
             .collect();
@@ -1703,6 +1821,7 @@ fn prepare_unguarded(sink: &mut impl ModelSink, path: &str, keep_cpu: bool, firs
         if hidden {
             continue;
         }
+        if attachments { shape_objects.insert(o.block, out.shapes.len()); }
         out.shapes.push(PreparedShape {
             cpu,
             segments,
@@ -1730,6 +1849,7 @@ fn prepare_unguarded(sink: &mut impl ModelSink, path: &str, keep_cpu: bool, firs
     if !swaps.is_empty() {
         info!("{path}: texture swap: {} entr(ies), {} shape(s) retextured: {}", swaps.len(), swapped.len(), swapped.join(", "));
     }
+    if attachments { out.objects = attachment::objects(&objects, &dec, &shape_objects, rig.as_ref().map(|(_, index)| index)); }
     out.rig = rig.map(|(r, _)| r);
     Ok(out)
 }

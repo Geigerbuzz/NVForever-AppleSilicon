@@ -579,7 +579,7 @@ fn resurrect_generates_a_dead_actor_again_where_it_lies() {
     assert_eq!(g.world.peek(adult).unwrap().pos, [180.0, -10.0, 9.0]);
     assert!(g.teleported.contains(&adult));
     assert_eq!(g.rolls(adult), 1);
-    assert_eq!(g.take_resurrections(), vec![fnv_game::resurrect::Resurrection { actor: adult, animate: true, regenerated: true, rolls: 1 }]);
+    assert_eq!(g.take_resurrections(), vec![fnv_game::resurrect::Resurrection { actor: adult, animate: true, regenerated: true, rolls: 1, restocked: 0 }]);
     assert!(g.take_resurrections().is_empty());
 }
 
@@ -907,6 +907,23 @@ fn capped_destruction_fixture() -> Fixture {
     }).collect();
     f.data.destructibles.insert(FormId(ACTI), DestructionDef { health: 20, stages, ..DestructionDef::default() });
     f
+}
+
+/// The Exploding Destructible Indicator tweak's list: an object burning toward a stage
+/// that explodes, until it gets there.
+#[test]
+fn a_burning_object_is_listed_until_it_explodes() {
+    let f = capped_destruction_fixture();
+    let mut g = game(&f);
+    let acti = FormId(ACTI_REF);
+    assert!(g.burning_explosives().is_empty());
+    // 0.5 of 20: stage 0 (98 %), which burns, its later stage 2 explodes.
+    g.damage_object(acti, 0.5).unwrap();
+    assert_eq!(g.burning_explosives(), [(acti, FormId(0x893))]);
+    for _ in 0..8 {
+        g.damage_object(acti, 20.0);
+    }
+    assert!(g.burning_explosives().is_empty());
 }
 
 fn destruction_roundtrip<'a>(f: &'a Fixture, g: &Game<'_>) -> Game<'a> {

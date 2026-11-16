@@ -134,6 +134,8 @@
 //!   fCombatFleeBoostConfidenceTargetRadius, its confidence goes up a level and it checks
 //!   again: it fights again or flees on; after fCombatFleeWaitTime there it checks again
 //!   without a boost [hypothesis: what the wait time is for].
+//!   A child (its race's Child flag, `Game::never_fights`) flees at once, unhurt, and
+//!   never turns to fight again [owner decision 2026-11-13, #2438].
 //! - **Hiding at the flee spot** (docs/design/combat-ai.md §12.2.1): a person that has
 //!   reached its flee spot is crouched there by the rules (`Game::sneaks`,
 //!   `Game::at_flee_spot`: the crouched set, and the original's cower idle over it,
@@ -1803,9 +1805,11 @@ pub(crate) fn fight(
                         }
                     }
                 }
-                None if fighter.flee_check_in <= 0.0 => {
+                // A coward or a child checks at once, hurt or not (`Game::always_flees`,
+                // `Game::never_fights`, #2438).
+                None if fighter.flee_check_in <= 0.0 || g.always_flees(me) || g.never_fights(me) => {
                     fighter.flee_check_in = g.threat_ratio_update_time() as f32 * next_unit(&mut f.rng);
-                    if health < full {
+                    if health < full || g.always_flees(me) || g.never_fights(me) {
                         f.stats.flee_checks += 1;
                         let check = g.flee_check(me, fighter.confidence_mod);
                         if check.flees {
@@ -1816,14 +1820,20 @@ pub(crate) fn fight(
                             f.stats.flees += 1;
                             let side = battle.side_of(g, id);
                             battle.sides[side].flights += 1;
-                            let (kind, ratio) = if check.personal { ("personal survival", check.personal_ratio) } else { ("group", check.group_ratio) };
-                            info!(
-                                "npc combat: {me_name} flees from {target_name}: {kind} threat ratio {:.3} below its confidence {:.4} (rating {}, modifier {:+.2}; health {health:.0} of {full:.0})",
-                                ratio.unwrap_or(0.0),
-                                check.threshold,
-                                check.rating,
-                                fighter.confidence_mod
-                            );
+                            // A coward the ratios alone would not send off says so.
+                            let by_ratio = check.personal || check.group_ratio.is_some_and(|r| fnv_game::combat_style::flees(r, check.threshold, fighter.confidence_mod));
+                            if check.rating <= 0 && !by_ratio {
+                                info!("npc combat: {me_name} flees from {target_name}: its confidence is Cowardly (health {health:.0} of {full:.0})");
+                            } else {
+                                let (kind, ratio) = if check.personal { ("personal survival", check.personal_ratio) } else { ("group", check.group_ratio) };
+                                info!(
+                                    "npc combat: {me_name} flees from {target_name}: {kind} threat ratio {:.3} below its confidence {:.4} (rating {}, modifier {:+.2}; health {health:.0} of {full:.0})",
+                                    ratio.unwrap_or(0.0),
+                                    check.threshold,
+                                    check.rating,
+                                    fighter.confidence_mod
+                                );
+                            }
                         }
                     }
                 }
@@ -2659,7 +2669,7 @@ pub(crate) fn fight(
                         Decision::Throw(throw) => {
                             if let Some(throw) = npc_grenades::commit(throw, |weapon| g.world.remove_item(me, weapon, 1)) {
                                 let gr = throw.grenade;
-                                fire.write(ActorFire { shooter: me, weapon: gr.weapon, origin: throw.origin, aim: throw.aim, cone: GRENADE_CONE, muzzle: None, harmless: false });
+                                fire.write(ActorFire { shooter: me, weapon: gr.weapon, origin: throw.origin, aim: throw.aim, cone: GRENADE_CONE, muzzle: None, harmless: false, sure: None });
                                 anims.write(PlayAttack { actor: id, weapon: Some(gr.weapon), melee: false, sights: false, kind: Move::Attack, power: None, swing: None });
                                 let left = g.world.peek(me).and_then(|s| s.inventory.as_ref()).map_or(0, |i| i.free_count(gr.weapon));
                                 f.stats.grenades += 1;
@@ -2816,7 +2826,7 @@ pub(crate) fn fight(
                                 let actor_spread = shot_spread(&c.rules, &c.tuning, ws, &st, g.gun_wobble_off(me));
                                 g.other.jg9.spreads.insert(me, actor_spread);
                                 let cone = spread::cone_deg(actor_spread, 0.0, ws, &[]) + settling(fighter.firing_for);
-                                fire.write(ActorFire { shooter: me, weapon: *w, origin, aim, cone, muzzle, harmless: false });
+                                fire.write(ActorFire { shooter: me, weapon: *w, origin, aim, cone, muzzle, harmless: false, sure: None });
                                 anims.write(PlayAttack { actor: id, weapon: Some(*w), melee: false, sights: fighter.sights, kind: Move::Attack, power: None, swing: None });
                                 f.stats.shots += 1;
                                 f.stats.shot_offs.push(off.to_degrees());

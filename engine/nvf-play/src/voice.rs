@@ -469,6 +469,7 @@ fn play(
     mut effects: MessageWriter<PlaySound>,
     (sfx, sfx_settings): (Option<Res<crate::sfx::Sfx>>, Option<Res<crate::sfx::SfxSettings>>),
     mut cut_sounds: Option<ResMut<Assets<Panned<PcmSound>>>>,
+    mut cover: Option<ResMut<crate::sound_cover::SoundCover>>,
 ) {
     let player = player.as_deref();
     let st = &mut *state;
@@ -492,9 +493,16 @@ fn play(
         said
     });
     // A line heard where it is said follows its speaker and the listener.
+    let cover_now = std::time::Instant::now();
     for (speaker, p) in st.playing.iter() {
         if let Some(pan) = &p.pan {
             pan.set(placed_gains(&sim, player, *speaker));
+            // Heard at the listener while it plays, by the voice's fall-off
+            // (`crate::sound_cover`); a held line makes no sound.
+            let heard = player.filter(|_| p.entity.is_some() && !p.held && now < p.ends_at && *speaker != FormId::PLAYER_REF).and_then(|pl| hearing(&sim, pl, *speaker));
+            if let (Some((_, d)), Some(cover)) = (heard, cover.as_deref_mut()) {
+                cover.note(Some(crate::sound_cover::SoundCover::key(crate::sound_cover::VOICE_KIND, u64::from(speaker.0))), voice_gain(d), d, crate::sound_cover::LOOP_HOLD, cover_now);
+            }
         }
     }
     // Whatever holds a line's timer holds its sound: the sink is paused, the sound's end
@@ -615,7 +623,8 @@ fn play(
                 // Played also out of hearing, silent: it is heard if the speaker comes
                 // near (or the player does) while it lasts.
                 // Said through a helmet or a speaker: the voice filter (crate::voice_filter).
-                let filtered = crate::voice_filter::speaker_filtered(&sim, s.speaker);
+                // The player's tweak leaves voices unfiltered [design: docs/design/tweaks.md].
+                let filtered = !g.tweaks.no_voice_filter && crate::voice_filter::speaker_filtered(&sim, s.speaker);
                 // Said at a place: into the listener's room, cut at the line's end.
                 let room = sfx.as_ref().and_then(|x| x.room_reverb);
                 let reverb_on = sfx_settings.as_ref().is_some_and(|x| x.reverb);

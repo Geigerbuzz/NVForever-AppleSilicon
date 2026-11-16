@@ -66,7 +66,7 @@ fn app() -> App {
         .init_resource::<ShotVisuals>().init_resource::<crate::dismember::Dismemberment>()
         .init_resource::<held_grenade_probe::Probe>()
         .add_message::<ActorFire>().add_message::<ActorStrike>().add_message::<ShotFired>()
-        .add_message::<PlaySound>().add_message::<ActorHit>().add_message::<ActorPush>()
+        .add_message::<PlaySound>().add_message::<crate::sfx::ScaledSound>().add_message::<ActorHit>().add_message::<ActorPush>()
         .add_message::<ImpactFx>().add_message::<WeaponBroken>().add_message::<Knockback>()
         .add_message::<ExplosionFx>().add_message::<crate::world_sounds::ImpactPicked>()
         .add_message::<crate::RefChanged>()
@@ -183,7 +183,7 @@ fn clearing_ammo_projectile_falls_back_to_weapon_without_leaking_neighbor_edits(
 fn ordinary_actor_shot_without_script_runtime_preserves_typed_values() {
     let mut a = app();
     a.world_mut().remove_resource::<ScriptState>();
-    a.world_mut().write_message(ActorFire { shooter: FormId::PLAYER_REF, weapon: GUN, origin: [10.0, 20.0, 94.0], aim: [0.0, 1.0, 0.0], cone: 0.0, muzzle: None, harmless: false });
+    a.world_mut().write_message(ActorFire { shooter: FormId::PLAYER_REF, weapon: GUN, origin: [10.0, 20.0, 94.0], aim: [0.0, 1.0, 0.0], cone: 0.0, muzzle: None, harmless: false, sure: None });
     tick(&mut a);
     last(&a, PROJ, 1000.0, 10.0);
     typed_unchanged(&a);
@@ -241,7 +241,7 @@ fn consumer_app() -> App {
         .init_resource::<ShotVisuals>().init_resource::<crate::dismember::Dismemberment>()
         .init_resource::<held_grenade_probe::Probe>()
         .add_message::<ActorFire>().add_message::<ActorStrike>().add_message::<ShotFired>()
-        .add_message::<PlaySound>().add_message::<ActorHit>().add_message::<ActorPush>()
+        .add_message::<PlaySound>().add_message::<crate::sfx::ScaledSound>().add_message::<ActorHit>().add_message::<ActorPush>()
         .add_message::<ImpactFx>().add_message::<WeaponBroken>().add_message::<Knockback>()
         .add_message::<ExplosionFx>().add_message::<crate::world_sounds::ImpactPicked>()
         .add_message::<crate::RefChanged>()
@@ -259,7 +259,7 @@ fn consumer_app() -> App {
 }
 
 fn request_actor_shot(app: &mut App, weapon: FormId) {
-    app.world_mut().write_message(ActorFire { shooter: FormId::PLAYER_REF, weapon, origin: [10.0, 20.0, 94.0], aim: [0.0, 1.0, 0.0], cone: 0.0, muzzle: None, harmless: false });
+    app.world_mut().write_message(ActorFire { shooter: FormId::PLAYER_REF, weapon, origin: [10.0, 20.0, 94.0], aim: [0.0, 1.0, 0.0], cone: 0.0, muzzle: None, harmless: false, sure: None });
 }
 
 fn take_fired(app: &mut App) -> Vec<ShotFired> {
@@ -402,3 +402,6 @@ fn fixed_random_multi_projectile_launch_preserves_order_and_full_spawn_state() {
     }
     typed_unchanged(&a);
 }
+
+#[path = "projectile_lifecycle_tests.rs"]
+mod lifecycle_tests;

@@ -230,6 +230,14 @@ every PACK and IDLM subrecord of the six masters decodes with nothing left over
 - A script package (`AddScriptPackage`) takes precedence over all other packages until
   it is done; an actor has one at a time; without Must Complete / Must Reach Location it
   is removed at the next evaluation; it is saved with the game.
+- The same package added again while it is still the actor's current one and its goal
+  was met (no choice has dropped it yet) begins afresh: the goal is forgotten and the AI
+  takes it up anew, as after ResetAI; added while it still runs, nothing changes
+  [hypothesis: the GECK wiki's "until it is done" read per call; observer check 183].
+  The Lucky 38 elevator Victor needs it: his OnActivate adds his Dialogue package on
+  every talk and waits for the conversation before showing the floor box, and a second
+  talk soon after Stay Here otherwise opened none, for good [observed:
+  Lucky38VictorElevatorScript, SCPT 0x0015725D in FalloutNV.esm; issue #2424].
 - `EvaluatePackage` drops even a Must Complete / Must Reach Location package and chooses
   again.
 - Flags that shape choosing: **Must Complete** (does not end until its conditions are met:
@@ -341,7 +349,25 @@ location, in cell (radius ignored), near reference; the radius is editable.
     the activate distance.
   - **Do Not Control Target Movement** off: with a trigger location the target "will
     walk towards that location when the dialogue package starts", without one it "will
-    stand still and wait for the actor to reach the activation distance". **No
+    stand still and wait for the actor to reach the activation distance". NVForever
+    walks the player for case 2 (a wait location of radius 0) with the flag off and
+    the player as the target: once the player is within the activate distance and in
+    the actor's sight but outside the trigger location (a box or a radius), the player
+    walks, at walking pace and with the movement keys set aside, to the nearest point
+    48 units inside the box (or within three quarters of the radius), and the
+    conversation opens there (`fnv_ai` `lead_player`, `Game::player_lead`, nvf-play
+    `dialogue_lead_walks`) [hypothesis: when the walk starts, its pace and where it
+    ends; observer check 186]. A walk that gets no nearer its point (8 units) for 1.5 s,
+    something solid in the way, ends and the actor talks where the player stands
+    (`fnv_ai::carry::LEAD_STUCK_SECONDS`) [our choice: the player is never held walking
+    into a wall]. A trigger location that is a cell, or a reference with
+    neither radius nor box, keeps the plain case 2. Scripts count on it: Paladin Ramos's "Follow me" (INFO
+    000A3CE0, HVRamosEntryDialogPackage, activate distance 300) disables the controls
+    and leaves the escort to the OnTrigger block of HVRamosTargetDialogTrigger, which
+    moves Ramos and the player to HiddenValley02 and gives the controls back only
+    while the player is inside the box; the box ends 218 units from Ramos's wait
+    marker, so a player greeted at 296 units stood outside it for good (issue #2453)
+    [observed: the scripts, `fnvtool script decompile --form 15E57A`]. **No
     HeadTracking**: speaker and target "will not be forced to look at each other by the
     package". FOV: the dialogue menu's zoom when the target is the player. Topic: the
     first topic of a conversation between two NPCs, or the Say To line.
@@ -1268,3 +1294,155 @@ PLAYERLAYMINE 56; the other PLAYER… topics have none.
   (`Game::end_timed_packages`), which a GameHour write does not move, and a held package
   (Must Complete, Must Reach Location until its goal) stays through the new choice. So the
   Goodsprings night stalkers of #2279 are not obviously fixed by this.
+
+## 10. A Find package for the player: Cachino in Gomorrah (issue #2473)
+
+- **The data** [observed: `fnvtool ai show --actor VMS21CachinoREF`, `script decompile`,
+  `dialogue lines`, `world refs --cell Gomorrah01`, FalloutNV.esm]:
+  - Cachino (`VMS21CachinoREF` 0x0011118D, base `VMS21Cachino` 0x0010C6F5) is placed
+    initially disabled in Gomorrah01 ("Gomorrah Main Level") at (7159, 1281, 6400).
+  - The lines where the player asks Gomorrah's people about him enable him: the end
+    scripts of INFO 0x001750C7 / 0x001750A9 (topics `vDialogueGomorrahGenericTopic003` /
+    `005`, the player's two prompts asking where Cachino is), 0x001750CD (`Topic007`), 0x001750B4, 0x0016318A, 0x0016318B, 0x0011663F
+    (`Topic006`) and the receptionist's 0x001537FF all run `0x0011118D.enable` (and
+    `setobjectivedisplayed 0x00136166 27 0`; 0x001750C7 also sets VMS21's
+    `icachinoquestions` to 1, 0x001537FF sets VMS21's objectives 1 done, 10 shown). Two of
+    those lines tell the player that Cachino will come to them: 0x001750CD (he will be sent
+    to the player, who should wait at Brimstone, the bar of the main level) and 0x001750B4
+    (he will find the player).
+    No quest stage is set and no script calls StartConversation, EvaluatePackage or
+    AddScriptPackage on him at that point.
+  - His package list, in order: `VMS21CachinoNeroSit`, `VMS21CachinoSalSit`,
+    `VMS21CachinoDialoguePackage2` (a Dialogue package of the boss-room scene, VMS21
+    variables 5 >= 2 and 28 == 0), `VMS21CachinoBossRoomTravelWait`, then
+    **`vGomorrahCachinoDialoguePackage`** (PACK 0x00119485), then
+    `DefaultSandboxLinkedMarker256NoSleepNoWander`. The first four read quest variables
+    of the later scenes; the fifth is the one for this moment.
+  - `vGomorrahCachinoDialoguePackage` is a **Find** package (type 0, not Dialogue), no
+    flags, schedule any time, location "near editor location" radius 0, target the
+    specific reference PlayerRef with count / distance 0, no begin / end / change topic
+    or script. Conditions: `GetTalkedToPC == 0` (subject) AND (target `GetInCell
+    Gomorrah00 == 1` OR `Gomorrah01` OR `Gomorrah02` OR `Gomorrah03`): valid while he has
+    not talked to the player and the player is in any of the four Gomorrah cells.
+  - His GREETING lines (quest `vDialogueGomorrah`) start, for VMS21 before stage 10 and
+    objective 31 not shown, with the Say Once INFO 0x001133A0 (about the player asking
+    questions about him), then 0x001164B1 (for meeting the player again).
+- **What follows from it** [hypothesis]: nothing but the package can bring him to the
+  player, and nothing but a conversation ends it (GetTalkedToPC turns 1 only once he has
+  talked to the player). So the original's Find, for a living actor named as its target,
+  goes to that actor where it is, and on reaching the player it talks: the documented
+  "Find: Idles play when 'activating' the target of the find" (Category:Packages) reads
+  as the actor activating its target, and an actor activated is talked to. The owner saw
+  it in the original: he walks up soon after the player asks and asks why they are
+  asking about the family [owner statement 2026-11-14, issue #2473]. The masters'
+  `DefaultFindPlayerPackage` (0x00140D3E) has the same shape (near editor location,
+  radius 0, PlayerRef), named for finding the player wherever they are.
+- **Before #2473** [observed in ours, smoke `cachino-find-greet` on main]: a radius 0
+  search area was 512 units around the location (§3.1, our choice), for a named
+  reference too; the player asking at the bar or the floor, farther than 512 from his
+  spot, was not in the area, so he found nothing and stood still ("finds nothing more"),
+  looking again every 10 s. Reaching the player only stood him there.
+- **What is built** [design, #2473]: a Find whose target is one reference and whose
+  location has no radius (0) has no search area: it goes after that reference wherever it
+  is (another cell too, over the navmeshes and through doors). A location with a radius
+  keeps its area (`VMS18HeadWaiterGetFood` 128 around the pie, `NellisFindJanet` 128).
+  A Find that reaches **the player**, without Allow Killing and not in combat, starts a
+  conversation as a force greet (`Game::force_greet`, its GREETING; a clear line to the
+  player as for Dialogue packages, `Game::greet_sight`, and held while a menu or a
+  loading screen is up). With nothing to say the package is over as before. Of the 14
+  Find packages of FalloutNV.esm with a specific reference target, five name the player:
+  this one, `DefaultFindPlayerPackage`, `BMTabithaPissedFindPackage` (Weapon Drawn; no
+  actor lists it and no script adds it) and Fallout 3's `FFEU02/05GreetPlayer`, named
+  for the greeting.
+- **Open**: how near the original's actor comes before it talks, how long it takes to set
+  off, and whether a Weapon Drawn Find to the player talks too (observer check 176).
+
+## 11. Package places no walk reaches: the five actors of issue #2405
+
+Players' reports of build 0.7.0 had five named actors log "cannot reach the place of …:
+the goal cannot be reached (0 triangles searched)" every game hour. That text is
+`fnv_nav::PathError::Unreachable` with nothing searched: the door search
+(`NavGraph::door_route`) found no chain of usable doors between the two walkable areas,
+so no triangle was searched; both places were on the navmesh [observed: the code,
+`crates/fnv-nav/src/path.rs`]. Per actor [observed: `fnvtool ai show`, `ai run`, `nav path`,
+`esm decode`, `script decompile`, `world refs`, FalloutNV.esm]:
+
+- **GomezREF** (0x0015A02E, SafehouseNCRINT). Placed in a hidden side room at (7691, 742,
+  6127), on a navmesh island of two triangles. `SafehouseNCRRangerLeave` (Travel, near
+  `GomezDoor` 0x0015A02B at (2811, 951, 6438), by the cave exit, another island of the
+  same cell) is valid while `vSafehouse` variable 10 is 1; that variable is
+  `GomezGoToSleep` (SCRI 0x00159A99, SLSD index 10). No door joins the islands; the data
+  moves him between them only by scripts (the side room's trigger `MoveTo GomezDoor` when
+  his Enter patrol walks into it; the door trigger `MoveTo GomezSleep` and
+  `SetUnconscious 1` while `GomezGoToSleep` is 1). So whenever Leave is chosen while he
+  stands in the side room, no walk gets him there.
+- **AtticusREF** (0x0015A04E, SafehouseLegionINT): built the same way
+  (`SafehouseLegionVeteranLeave` to `AtticusDoor`; `AtticusGoToSleep` is variable 14).
+  His base `SafehouseLegionVeteran` (0x0015A029) has "No Low Level Processing", so out of
+  the loaded area he is never updated (`fnv_ai::process`): his reports can only come
+  from the high process, with the player in the safehouse.
+- **SSHQMalcolmHolmesREF** (0x0010651A). `SSHQMalcolmHolmesWaitsPackage` travels to his
+  editor location in the holding cell `RandomEncounterNPCs` while `VFreeformSSHQ`
+  variable 34 is 0 and the player (run on reference 0x14) is not in WastelandNV
+  (GetInWorldspace != 1). The holding cell has no door. So once he has met the player in
+  the wasteland, the player going into any interior or other worldspace (the reports:
+  SLJeanSkyDivingINT, SLniptonRoadMarketINT) sends him to a place no door leads to; he
+  is then out of the loaded area.
+- **GibsonDogReyRef** (0x00084204, GibsonScrapYardInterior). `DefaultFollowLinkedClose`
+  follows his linked reference `OldLadyGibsonRef`, whose day packages
+  (OldLadyGibsonPackageSit) take her out of the shack's door (0x000841F5) to her chair in
+  WastelandNV. His base `GibsonDogRey` (0x000CD230) has "Can't Open Doors" (and "No Low
+  Level Processing"), so by §7.1 no load door is open to him: reproduced headless, an
+  Unreachable at every hour she sits outside.
+- **Ghoul5** (0x00087AEF) and the other REPCONN ghouls in RocketLabTop.
+  `REPCONGhoulRocketWalkPACKAGE` (valid at VMS01 variable 25 == 3) travels to
+  `JasonBrightDialogMarker` (0x0008D47A) in RocketLabBasement. The way is Top → Mid
+  (0x000829EB) → Basement through `REPCONMidToBasementDoor` (0x000840AC), which is locked
+  (level 25, key `REPCONLowerKey` 0x000810E8, which no script gives to the ghouls; the
+  only AddItem of it is to the player). No script unlocks that door. But the trigger
+  `REPCONTopIntercomTrigger` (0x000CD683, script 0x000CE1BB) stands at (512, 2734) in
+  RocketLabTop, just in front of the door to Mid at (512, 2940): while VMS01
+  `nightkinquest` is 3, any actor but the player and teammates entering it is moved on
+  by its script (Chris Haversam to 0x000CE1C5 and disabled; Jason Bright `MoveTo
+  JasonBrightDialogMarker`; the rest given clothes and `MoveToMarkerWithFade
+  REPCONRocketPadDestinationMarker` 0x000CE1B1, all in the basement). So the data expects
+  the ghouls to *start* their walk and be taken off it by the trigger, two doors short
+  of the lock; ours never starts a walk whose whole way is not open.
+
+**What is built** (#2405):
+
+- **Out of sight, no door at all** [hypothesis: the data moves such actors only by
+  scripts or not at all; observer check 145 asks the original]: an actor out of the
+  high process (no body drawn) whose walk to its package's own place (a Travel's, a
+  Sleep's, a Sandbox's centre; not a patrol point, not a walk of its own) has no way, and
+  between whose place and that place there is no door at all, locked and disabled ones
+  counted (`NavGraph::joined_by_doors`), is put at the place and has arrived
+  (`AiEvent::PutThere`, engine log "put at the place of … out of sight, no door joining
+  the two"). Gomez out of sight lands at GomezDoor, inside the door trigger that puts him
+  to sleep when the player comes in and the cell loads (`script_trigger`: an actor
+  touching a trigger in a loaded cell fires OnTriggerEnter); Holmes goes back to his
+  holding cell. A disabled door between the two still joins them, so Loyal behind the
+  B-29 hangar's disabled doors (#2566, check 160) is not moved. In the loaded area
+  nothing changed: the package is set aside as before.
+- **A creature that cannot open doors** whose way (to its package's place, or after
+  the one it follows or goes up to talk to) needs a load door stays, and the package is
+  set aside as for no way, but it is told apart (`AiEvent::DoorsClosedToIt`, engine log
+  "stays: the way to the place of … needs a load door, and it cannot open doors"), not
+  reported as a path failure: Rey stays in the shack while Old Lady Gibson sits outside.
+- `fnvtool ai run --out-of-sight` runs the named actors at the Low level; smoke
+  `ai-no-door-out-of-sight` (headless) and `ai-no-door-out-of-sight-game`.
+- `ai reach` is unchanged: it answers whether an actor can walk there, and its verdicts
+  ("no way there", "only through a door the creature cannot open") are as before.
+
+**Left open**:
+
+- Gomez and Atticus with the player in their safehouse (the high process): still set
+  aside and reported every hour. Putting a drawn actor somewhere needs its body moved
+  as a MoveTo does; not built, pending check 145. Atticus, with No Low Level
+  Processing, is only ever in that case.
+- The REPCONN ghouls: a way closed only by a locked door is still no way, so the walk
+  that would take them into the intercom trigger never starts. Walking as far as the
+  locked door would change what every actor behind a locked door does (54 actor-package
+  pairs in FalloutNV.esm, `ai reach` "only through a locked door the actor has no key
+  for") and the engine's settled rule (tests in `fnv-ai/tests/carry.rs`); observer check
+  204 asks the original first.

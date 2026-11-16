@@ -28,7 +28,7 @@ use fnv_game::game::Game;
 use fnv_game::package::{fallout, flags, PackageType};
 use fnv_game::use_weapon::Source;
 use fnv_nav::follow::heading_of;
-use fnv_nav::{NavGraph, PathParams, Place, Space, WalkEvent, Walker};
+use fnv_nav::{NavGraph, PathError, PathParams, Place, Space, WalkEvent, Walker};
 use fnv_sim::FormId;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -239,6 +239,12 @@ pub enum AiEvent {
     Arrived { package: FormId, seconds: f64, travelled: f32, patrol_point: Option<FormId> },
     /// No way to the package's location: the package is set aside.
     Unreachable { package: FormId, why: String },
+    /// Out of sight, with no door joining where it is and where its package sends it: it
+    /// is put there (docs/spec-notes/packages.md §11).
+    PutThere { package: FormId, from: Place, to: Place },
+    /// The way there needs a load door and the creature cannot open doors (Can't Open
+    /// Doors, packages.md §7.1): it stays, and the package is set aside as for no way.
+    DoorsClosedToIt { package: FormId },
     /// Its feet at `at` do not fit its goal's height and no new path helped: its walk ends
     /// as if they did (`fnv_nav::Walker::off_path`).
     HeightWaived { at: [f32; 3] },
@@ -286,6 +292,14 @@ pub enum AiEvent {
     /// It is near enough to force-greet `target`, `away` units off, but something solid
     /// is between them (a wall, a closed door): it waits ([`Game::greet_sight`]).
     TalkUnseen { package: FormId, target: FormId, away: f32 },
+    /// Its Dialogue package walks the player, `away` units off, into its trigger location
+    /// before it talks, to `to` (`Game::player_lead`; "Do Not Control Target Movement"
+    /// off).
+    LeadsPlayer { package: FormId, to: [f32; 3], away: f32 },
+    /// The walk of [`AiEvent::LeadsPlayer`] got no nearer its point for
+    /// [`LEAD_STUCK_SECONDS`] (a rail, furniture, a step in the way): the actor talks
+    /// where the player stands, `left` units short of the point.
+    LeadStuck { package: FormId, left: f32 },
     /// A script's StartConversation sent it to the player (`Game::walk_up_greet`): it sets
     /// off, `away` units from the player, a way of `length` units.
     WalkUp { away: Option<f32>, length: f32 },
@@ -449,7 +463,7 @@ pub enum Talking {
 
 /// Whether `actor` is saying its greeting at the player outside a conversation
 /// (`Speech::greeting`).
-fn greets(game: &Game, actor: FormId) -> bool {
+pub(crate) fn greets(game: &Game, actor: FormId) -> bool {
     game.speech.iter().any(|s| s.greeting && s.speaker == actor)
 }
 
@@ -719,7 +733,11 @@ pub struct Ai {
     /// Actors near enough to force-greet the one their Dialogue package names but with a
     /// wall or a closed door between ([`Game::greet_sight`]), logged once until they talk
     /// or the line clears.
-    unseen_greets: std::collections::BTreeSet<FormId>,
+    pub(crate) unseen_greets: std::collections::BTreeSet<FormId>,
+    /// Actors leading the player into their trigger location ([`Ai::lead_player`]): the
+    /// player's nearest approach to the lead's point so far and when it last grew
+    /// nearer, so that a walk that gets no nearer (something solid in the way) ends.
+    lead_progress: BTreeMap<FormId, (f32, f64)>,
     /// Progress a loaded save kept, by actor, until the actor takes up that package again
     /// ([`crate::progress`]).
     pub(crate) restored: BTreeMap<FormId, crate::progress::Progress>,
@@ -798,7 +816,7 @@ fn hdist(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 impl Ai {
     pub fn new(cfg: AiConfig) -> Ai {
-        Ai { cfg, agents: BTreeMap::new(), events: Vec::new(), taken: BTreeMap::new(), furniture: Default::default(), social: Default::default(), low: BTreeMap::new(), process_stats: Default::default(), far: Default::default(), coming: Default::default(), loaded: None, speeds: BTreeMap::new(), paces: BTreeMap::new(), applied_switches: None, applied_locks: None, applied_obstacles: None, applied_presence: None, locked_doors: Vec::new(), unseen_greets: Default::default(), restrained: Default::default(), woken: Default::default(), columns: BTreeMap::new(), script_moved: BTreeMap::new(), restored: BTreeMap::new(), stalled: BTreeMap::new() }
+        Ai { cfg, agents: BTreeMap::new(), events: Vec::new(), taken: BTreeMap::new(), furniture: Default::default(), social: Default::default(), low: BTreeMap::new(), process_stats: Default::default(), far: Default::default(), coming: Default::default(), loaded: None, speeds: BTreeMap::new(), paces: BTreeMap::new(), applied_switches: None, applied_locks: None, applied_obstacles: None, applied_presence: None, locked_doors: Vec::new(), unseen_greets: Default::default(), lead_progress: BTreeMap::new(), restrained: Default::default(), woken: Default::default(), columns: BTreeMap::new(), script_moved: BTreeMap::new(), restored: BTreeMap::new(), stalled: BTreeMap::new() }
     }
 
     /// Give the AI what the assets say about furniture and skeletons ([`crate::furniture`]),
@@ -870,9 +888,11 @@ impl Ai {
             return None;
         }
         self.applied_locks = Some(serial);
-        let states = game.world.changed().filter_map(|(id, s)| {
-            let lock = s.lock?;
-            Some((id.0, lock.locked.then_some(fnv_nav::graph::DoorLock { level: lock.level, key: lock.key.map(|k| k.0) })))
+        // [design, #2538] Include cold load doors: their applicable lock can live on
+        // the other side, even when this side has never been materialised.
+        let states = nav.door_refs().into_iter().map(|id| {
+            let lock = game.world.lock_of(FormId(id)).filter(|l| l.locked);
+            (id, lock.map(|l| fnv_nav::graph::DoorLock { level: l.level, key: l.key.map(|k| k.0) }))
         });
         let changes = nav.sync_door_locks(states.collect::<Vec<_>>());
         self.locked_doors = nav.door_locks.keys().copied().collect();
@@ -1752,6 +1772,8 @@ impl Ai {
     ///
     /// The wait location's radius is not wandered in; the target is not made to stand
     /// still or to walk to the trigger location ("Do Not Control Target Movement" off).
+    /// Except that with that flag off, in case 2 a player within the activate distance
+    /// but outside the trigger location is walked into it first (issue #2453, below).
     fn talk_step(&mut self, game: &mut Game, nav: &NavGraph, actor: FormId, dt: f32) {
         let a = &self.agents[&actor];
         let (Some(package), Some(Goal::Talk(talk)), Some(phase)) = (a.package, a.goal.clone(), a.talk) else { return };
@@ -1805,7 +1827,24 @@ impl Ai {
                 let triggered = talk.trigger.holds(game, feet, target);
                 // Case 2: a trigger location and a wait location without a radius.
                 let on_the_spot = talk.trigger != goal::Trigger::None && talk.wait_radius == 0.0;
-                if near && (triggered || on_the_spot) {
+                // With "Do Not Control Target Movement" off the target "will walk
+                // towards that location [the trigger location] when the dialogue
+                // package starts" [documented: GECK wiki, Dialogue Package]. End scripts
+                // count on the player standing in it: Ramos's "Follow me" (INFO
+                // 000A3CE0) leaves the escort to an OnTrigger block of the trigger
+                // location itself (HVRamosTargetDialogTrigger), which runs only with the
+                // player inside it (issue #2453). So once the player is within the
+                // activate distance (and in sight, as for the greeting itself) but not
+                // in the trigger location, the player is walked into it
+                // (`Game::player_lead`) and the conversation opens there [hypothesis:
+                // when the walk starts, and that it ends inside the location;
+                // docs/spec-notes/packages.md §3].
+                let leads = on_the_spot && talk.control_target && talk.target == FormId::PLAYER_REF && talk.trigger.has_room(game);
+                if near && triggered {
+                    self.talk_start(game, actor, package, &talk, away);
+                } else if near && leads {
+                    self.lead_player(game, actor, package, &talk, feet, target, away);
+                } else if near && on_the_spot {
                     self.talk_start(game, actor, package, &talk, away);
                 } else if triggered && !stays {
                     self.approach(game, nav, actor, package, &talk, target, true);
@@ -2026,7 +2065,8 @@ impl Ai {
             }
             Err(e) => {
                 a.following = None;
-                self.unreachable(game, actor, package, e.to_string());
+                let from = Place { space: a.walker.space, pos: a.walker.feet };
+                self.no_way_after(game, nav, actor, package, from, target, e);
             }
         }
     }
@@ -2064,7 +2104,7 @@ impl Ai {
             }
             Err(e) => {
                 a.talk = None;
-                self.unreachable(game, actor, package, e.to_string());
+                self.no_way_after(game, nav, actor, package, from, target, e);
             }
         }
     }
@@ -2126,6 +2166,7 @@ impl Ai {
         // (`Game::force_greet`).
         match game.force_greet(actor, talk.topic) {
             Ok(line) => {
+                Self::end_lead(game, actor);
                 self.agents.get_mut(&actor).expect("listed").talk = Some(Talking::Speaking);
                 let greeting = greets(game, actor);
                 self.log(game, actor, AiEvent::Talk { package, target: talk.target, line, away, say_to: false, greeting });
@@ -2143,7 +2184,57 @@ impl Ai {
     /// Must Complete Dialogue package "will not reevaluate until actor has engaged in
     /// dialogue with the target"]. The actor stays in the package until it chooses
     /// another; it does not start over [our choice].
+    /// Walk the player into the trigger location of `actor`'s Dialogue package
+    /// ([`Self::talk_step`]): set [`Game::player_lead`] again, once the actor sees the
+    /// player (as for a force greet, `Game::greet_sight`). Without a point to walk to,
+    /// the actor talks where the player is.
+    #[allow(clippy::too_many_arguments)]
+    fn lead_player(&mut self, game: &mut Game, actor: FormId, package: FormId, talk: &Talk, feet: Place, target: Place, away: f32) {
+        if !game.greet_sight(actor, talk.target) {
+            if self.unseen_greets.insert(actor) {
+                self.log(game, actor, AiEvent::TalkUnseen { package, target: talk.target, away });
+            }
+            return;
+        }
+        self.unseen_greets.remove(&actor);
+        let Some(to) = talk.trigger.lead_point(game, feet, target) else {
+            self.talk_start(game, actor, package, talk, away);
+            return;
+        };
+        let new = !game.player_lead.is_some_and(|l| l.by == actor && l.fresh(game.time));
+        // A walk that gets no nearer gives up: the player is never held walking into
+        // something solid for as long as the actor sees them [our choice, review of
+        // #2465]; the actor greets where the player stands.
+        let left = (to[0] - target.pos[0]).hypot(to[1] - target.pos[1]);
+        let now = game.time;
+        let p = self.lead_progress.entry(actor).or_insert((left, now));
+        if new {
+            *p = (left, now);
+        }
+        if left < p.0 - LEAD_GAIN {
+            *p = (left, now);
+        } else if now - p.1 > LEAD_STUCK_SECONDS {
+            self.lead_progress.remove(&actor);
+            Self::end_lead(game, actor);
+            self.log(game, actor, AiEvent::LeadStuck { package, left });
+            self.talk_start(game, actor, package, talk, away);
+            return;
+        }
+        game.player_lead = Some(fnv_game::game::PlayerLead { by: actor, to, at: game.time });
+        if new {
+            self.log(game, actor, AiEvent::LeadsPlayer { package, to, away });
+        }
+    }
+
+    /// The lead of `actor`'s package is over ([`Self::lead_player`]).
+    fn end_lead(game: &mut Game, actor: FormId) {
+        if game.player_lead.is_some_and(|l| l.by == actor) {
+            game.player_lead = None;
+        }
+    }
+
     fn talk_done(&mut self, game: &mut Game, actor: FormId) {
+        Self::end_lead(game, actor);
         let a = self.agents.get_mut(&actor).expect("listed");
         a.talk = Some(Talking::Done);
         a.activity = Activity::There;
@@ -2175,7 +2266,7 @@ impl Ai {
             return;
         }
         // Its weapon use's target first, unless the fight took the use over (#2544): the
-        // shooter fires only once it faces the target (`USE_FACING`).
+        // shooter fires only once it faces the target (`use_weapon::shot_facing`).
         let space = self.agents[&actor].walker.space;
         if let Some(t) = game.active_weapon_use(actor).filter(|w| w.in_place && !w.taken).map(|w| w.target) {
             if let Some(to) = goal::place_of_ref(game, t).filter(|p| p.space == space) {
@@ -2701,6 +2792,7 @@ impl Ai {
         let own = Ai::walk_pace_of(game, actor, running, speed);
         let a = self.agents.get_mut(&actor).expect("listed");
         (a.walker.speed, a.walk_pace) = (speed, own);
+        let from = Place { space: a.walker.space, pos: a.walker.feet };
         match a.walker.go_to(nav, to, &params) {
             Ok(path) => {
                 let doors = path.legs.iter().filter_map(|l| l.door.map(|d| FormId(d.door))).collect();
@@ -2722,9 +2814,70 @@ impl Ai {
             }
             Err(e) => {
                 a.talk = None;
-                self.unreachable(game, actor, package, e.to_string())
+                self.no_way(game, nav, actor, package, from, to, patrol_point, e, &params)
             }
         }
+    }
+
+    /// No way from `from` to `to` for a package's walk ([`Ai::plan`]); packages.md §11:
+    /// - the way needs a load door and the creature cannot open doors: it stays
+    ///   ([`AiEvent::DoorsClosedToIt`]);
+    /// - out of sight (out of the high process: no body is drawn for it), going to its
+    ///   package's one place (a Travel's, a Sleep's, a Sandbox's centre; not a patrol
+    ///   point, not a walk of its own), with no door at all between the two places,
+    ///   locked or disabled: it is put there and has arrived [hypothesis: the data moves
+    ///   such actors only by scripts or not at all, Gomez in the NCR safehouse's side
+    ///   room, Malcolm Holmes back to his holding cell; observer check 145];
+    /// - otherwise the package is set aside ([`Ai::unreachable`]).
+    #[allow(clippy::too_many_arguments)]
+    fn no_way(&mut self, game: &mut Game, nav: &NavGraph, actor: FormId, package: FormId, from: Place, to: Place, patrol_point: Option<FormId>, e: PathError, params: &PathParams) {
+        if !matches!(e, PathError::Unreachable { .. }) {
+            return self.unreachable(game, actor, package, e.to_string());
+        }
+        if !params.opens_doors && nav.can_reach(from, to, &PathParams { opens_doors: true, ..params.clone() }) {
+            self.log(game, actor, AiEvent::DoorsClosedToIt { package });
+            return self.set_aside(game, actor, package);
+        }
+        // Only the walk to the package's own place: not a patrol's, a sandbox's own walk
+        // to its furniture, a wait location's.
+        let own_place = match &self.agents[&actor].goal {
+            Some(Goal::Near { place, .. }) => *place == to,
+            Some(Goal::Inside { at, .. }) => *at == to,
+            _ => false,
+        };
+        if own_place && patrol_point.is_none() && !self.is_high(actor) && nav.joined_by_doors(from, to) == Some(false) {
+            return self.put_there(game, nav, actor, package, from, to);
+        }
+        self.unreachable(game, actor, package, e.to_string())
+    }
+
+    /// [`Ai::no_way`] for a walk after someone (a Follow, the way up to whom it talks to):
+    /// only the creature that cannot open doors is told apart.
+    #[allow(clippy::too_many_arguments)]
+    fn no_way_after(&mut self, game: &mut Game, nav: &NavGraph, actor: FormId, package: FormId, from: Place, to: Place, e: PathError) {
+        let params = self.path_params(game, actor);
+        if matches!(e, PathError::Unreachable { .. }) && !params.opens_doors && nav.can_reach(from, to, &PathParams { opens_doors: true, ..params }) {
+            self.log(game, actor, AiEvent::DoorsClosedToIt { package });
+            return self.set_aside(game, actor, package);
+        }
+        self.unreachable(game, actor, package, e.to_string())
+    }
+
+    /// Out of sight, `actor` is put at `to`, the place of its package, and arrives there
+    /// ([`Ai::no_way`]).
+    fn put_there(&mut self, game: &mut Game, nav: &NavGraph, actor: FormId, package: FormId, from: Place, to: Place) {
+        self.log(game, actor, AiEvent::PutThere { package, from, to });
+        let a = self.agents.get_mut(&actor).expect("listed");
+        let w = &mut a.walker;
+        (w.space, w.feet) = (to.space, to.pos);
+        w.tri = nav.nearest(to.space, to.pos, 64.0).map_or(fnv_nav::graph::NONE, |(t, _)| t);
+        (w.turning, w.moving, w.follower) = (false, false, None);
+        let heading = w.heading;
+        a.trip_started = game.time;
+        a.trip_from = a.walker.travelled;
+        let cell = goal::cell_of_place(game.world.placed, &to);
+        let _ = game.set_actor_place(actor, cell, to.pos, heading);
+        self.arrived(game, nav, actor);
     }
 
     /// A script's StartConversation with the player from afar (`Game::walk_up_greet`):
@@ -2907,6 +3060,12 @@ impl Ai {
 
     fn unreachable(&mut self, game: &mut Game, actor: FormId, package: FormId, why: String) {
         self.log(game, actor, AiEvent::Unreachable { package, why });
+        self.set_aside(game, actor, package);
+    }
+
+    /// The package cannot be carried out from here: the actor stays and chooses again,
+    /// the package blocked for a while.
+    fn set_aside(&mut self, game: &mut Game, actor: FormId, package: FormId) {
         let a = self.agents.get_mut(&actor).expect("listed");
         a.activity = Activity::Staying;
         a.walker.follower = None;
@@ -3192,6 +3351,15 @@ fn nearest_point(route: &Route, feet: Place) -> usize {
         })
         .unwrap_or(0)
 }
+
+
+/// How long the player's walk into a Dialogue package's trigger location may get no
+/// nearer its point before the actor talks where the player stands
+/// ([`Ai::lead_player`]) [our choice].
+pub const LEAD_STUCK_SECONDS: f64 = 1.5;
+
+/// How much nearer the point counts as progress on that walk, in units [our choice].
+const LEAD_GAIN: f32 = 8.0;
 
 #[cfg(test)]
 mod tests {
