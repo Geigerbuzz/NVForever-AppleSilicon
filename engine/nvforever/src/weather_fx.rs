@@ -172,6 +172,7 @@ fn weather_fx(
     mut fx: ResMut<WeatherFx>,
     mut sky: ResMut<SkyState>,
     sfx: Option<Res<Sfx>>,
+    rain3d: Option<Res<crate::rain3d::NativeRain>>,
     time: Res<Time>,
     cam: Query<&Transform, (With<FlyCam>, Without<PrecipHolder>)>,
     root: Query<Entity, With<WorldRoot>>,
@@ -242,6 +243,11 @@ fn weather_fx(
     }
 
     // Precipitation: (re)placed when the model changes or its holder went with the world.
+    // 3-D rain replaces the model's planes (`rain3d.rs`, `--rain-3d`): the marker exists
+    // only with the flag, so without it this is exactly as before.
+    if rain3d.is_some() && want_precip.is_some() {
+        want_precip = None;
+    }
     if let Some((_, e)) = &fx.precip {
         if *e != Entity::PLACEHOLDER && holders.get(*e).is_err() {
             fx.precip = None;
