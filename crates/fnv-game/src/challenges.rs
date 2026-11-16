@@ -12,7 +12,7 @@
 //! | 0 kill from a form list | one per kill | SNAM victims' list, weapon |
 //! | 1 kill a specific form | one per kill | SNAM victim, weapon |
 //! | 2 kill any in a category | one per kill | value2 creature type + 1, value3 + XNAM weapon |
-//! | 3 hit an enemy | one per hit | value1 body part, value2 0 any / 1 critical / 2 knockdown / 3 cripple, weapon |
+//! | 3 hit an enemy | one per hit | value1 body part, value2 0 any / 1 critical / 2 knockdown / 3 cripple, SNAM victim, weapon |
 //! | 4 discover a map marker | one per marker | SNAM marker or XNAM list |
 //! | 5 / 9 use an item (from a list) | one per use | SNAM item / list |
 //! | 6 / 10 acquire an item (from a list) | the count | SNAM item / list |
@@ -139,8 +139,12 @@ impl Game<'_> {
         v
     }
 
+    /// Whether `form` is in `list`: the authored members plus those scripts added at run
+    /// time (AddFormToFormList), as every other form-list consumer reads it [observed:
+    /// GunRunnersArsenal.esm's setup script adds the GRA 12.7mm SMG 0x0100084E to
+    /// WeaponMachinegunLIST 0x0015EAD5, and the Nyah! See? challenge names that list].
     fn in_list(&self, list: Option<FormId>, form: FormId) -> bool {
-        list.and_then(|l| self.data.form_lists.get(&l)).is_some_and(|l| l.contains(&form))
+        list.is_some_and(|l| crate::functions::list_members(self, l).contains(&form))
     }
 
     /// Whether `weapon` (None: fists) passes the challenge's weapon filters: value2 the
@@ -161,6 +165,15 @@ impl Game<'_> {
             return false;
         }
         true
+    }
+
+    /// Whether a "hit an enemy" challenge's SNAM filter passes for `target`: the form
+    /// names the target or its base, as type 1's victim filter does [hypothesis: no
+    /// base-game type-3 challenge sets SNAM, so the only use is GunRunnersArsenal.esm's
+    /// "Even a God-King Can Bleed" (SNAM FortCaesar 0x00121FEF, "Cripple Caesar's head
+    /// with Throwing Spears"); a form list is not read, since no record puts one here].
+    fn hit_target_passes(&self, d: &ChallengeDef, target: FormId) -> bool {
+        d.form1.is_none_or(|f| f == target || crate::functions::base_of(self, target) == Some(f))
     }
 
     /// The weapon the player last hit `victim` with, else the one it holds.
@@ -208,7 +221,7 @@ impl Game<'_> {
                 HIT_CRIPPLE => crippled,
                 _ => false,
             };
-            if what && (d.value1 == 0 || part == Some(d.value1)) && self.weapon_passes(d, weapon, false) {
+            if what && (d.value1 == 0 || part == Some(d.value1)) && self.hit_target_passes(d, target) && self.weapon_passes(d, weapon, false) {
                 self.challenge_step(c, 1.0);
             }
         }
@@ -229,7 +242,7 @@ impl Game<'_> {
         let weapon = self.player_weapon_on(target);
         for c in self.challenge_list(kind::HIT_ENEMY) {
             let d = &data.challenge_defs[&c];
-            if d.value2 == HIT_KNOCKDOWN && d.value1 == 0 && self.weapon_passes(d, weapon, false) {
+            if d.value2 == HIT_KNOCKDOWN && d.value1 == 0 && self.hit_target_passes(d, target) && self.weapon_passes(d, weapon, false) {
                 self.challenge_step(c, 1.0);
             }
         }

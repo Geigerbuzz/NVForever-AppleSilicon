@@ -60,7 +60,11 @@ gives them [observed unless marked]:
   … terminals", 32 "Craft items", 1 "Discover locations" … all 41 fit.
 - **SNAM**: the victims' list (type 0), the victim's base NPC (1: Caesar 00121FEF,
   Kimball 0013002D, Elijah), the marker reference (4), the item (5: RadAway, Rad-X,
-  Turbo), the item list (9, 10), the ingredient (12: the Sierra Madre chip).
+  Turbo), the item list (9, 10), the ingredient (12: the Sierra Madre chip). For a
+  "hit an enemy" (3) it is the target's base NPC, or the target itself [hypothesis: no
+  master's type-3 challenge sets SNAM except GunRunnersArsenal.esm's "Even a God-King Can
+  Bleed" (SNAM FortCaesar 00121FEF, "Cripple Caesar's head with Throwing Spears"), so
+  this is the narrowest reading of the other types' victim filters].
 - **XNAM**: a weapon list (types 0, 1, 2, 3, 8), or a list of markers (type 4: "Visited
   every location in the Big MT").
 
@@ -71,7 +75,7 @@ Every count is the player's; others' deeds count nothing [design].
 | type | moves by | on | filters |
 |---|---|---|---|
 | 0, 1, 2 | 1 | `Game::kill` with the player the killer | victim (SNAM list, SNAM form against the reference or its base, creature type), weapon |
-| 3 | 1 | `Game::hit` by the player (damage > 0, critical, crippled), a knockdown by the player | body part, weapon (value3, XNAM; value2 is the hit kind) |
+| 3 | 1 | `Game::hit` by the player (damage > 0, critical, crippled), a knockdown by the player | body part, SNAM victim, weapon (value3, XNAM; value2 is the hit kind) |
 | 4 | 1 | the compass's discovery of a marker | SNAM, XNAM |
 | 5, 9 | 1 | `Game::ingest` by the player | SNAM, SNAM list |
 | 6, 10 | the count | every item added to the player (`ItemAdded`: AddItem, pick-ups, the loot and barter menus) | SNAM, SNAM list |
