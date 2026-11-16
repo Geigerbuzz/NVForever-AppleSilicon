@@ -28,7 +28,7 @@ use bevy_ecs::{
     query::{Has, Or, With, Without},
     resource::Resource,
     schedule::{common_conditions::any_match_filter, IntoScheduleConfigs as _},
-    system::{Commands, Query, Res, ResMut},
+    system::{Commands, Query, Res, ResMut, SystemParam},
     world::{FromWorld, World},
 };
 use bevy_log::warn_once;
@@ -2290,6 +2290,16 @@ impl UniformAllocationPipelines {
     clippy::too_many_arguments,
     reason = "it's a system that needs a lot of arguments"
 )]
+/// The bind-group caches `prepare_preprocess_bind_groups` fills, grouped into one
+/// [`SystemParam`]: the system reached Bevy's 16-parameter limit when the indirect-parameter
+/// cache (kept across frames, see `build_indirect_parameters_key`) was added.
+#[derive(SystemParam)]
+pub struct PreprocessBindGroupCaches<'w> {
+    bin_unpacking: ResMut<'w, BinUnpackingBindGroups>,
+    uniform_allocation: ResMut<'w, UniformAllocationBindGroups>,
+    build_indirect_parameters: ResMut<'w, BuildIndirectParametersBindGroups>,
+}
+
 pub fn prepare_preprocess_bind_groups(
     mut commands: Commands,
     views: Query<(Entity, &ExtractedView)>,
@@ -2305,9 +2315,7 @@ pub fn prepare_preprocess_bind_groups(
     view_uniforms: Res<ViewUniforms>,
     previous_view_uniforms: Res<PreviousViewUniforms>,
     pipelines: Res<PreprocessPipelines>,
-    mut bin_unpacking_bind_groups: ResMut<BinUnpackingBindGroups>,
-    mut uniform_allocation_bind_groups: ResMut<UniformAllocationBindGroups>,
-    mut build_indirect_parameters_bind_groups: ResMut<BuildIndirectParametersBindGroups>,
+    mut caches: PreprocessBindGroupCaches,
 ) {
     // Grab the `BatchedInstanceBuffers`.
     let BatchedInstanceBuffers {
@@ -2427,8 +2435,8 @@ pub fn prepare_preprocess_bind_groups(
     // Now, if there were any indirect draw commands, create the bind groups for
     // the indirect parameters building shader.
     if any_indirect {
-        create_build_indirect_parameters_bind_groups(
-            &mut build_indirect_parameters_bind_groups,
+        create_caches.build_indirect_parameters(
+            &mut caches.build_indirect_parameters,
             &render_device,
             &pipeline_cache,
             &pipelines,
@@ -2441,8 +2449,8 @@ pub fn prepare_preprocess_bind_groups(
     // Create the bind groups we'll need for each dispatch of the bin unpacking
     // (`unpack_bins`) and uniform allocation (`allocate_uniforms`) shaders.
     for (_, view) in &views {
-        create_bin_unpacking_bind_groups(
-            &mut bin_unpacking_bind_groups,
+        create_caches.bin_unpacking(
+            &mut caches.bin_unpacking,
             &render_device,
             &pipeline_cache,
             &pipelines,
@@ -2451,8 +2459,8 @@ pub fn prepare_preprocess_bind_groups(
             &scene_unpacking_buffers,
             &view.retained_view_entity,
         );
-        create_uniform_allocation_bind_groups(
-            &mut uniform_allocation_bind_groups,
+        create_caches.uniform_allocation(
+            &mut caches.uniform_allocation,
             &render_device,
             &pipeline_cache,
             &pipelines,
@@ -2466,9 +2474,9 @@ pub fn prepare_preprocess_bind_groups(
     // pairs that are gone, so that the two tables do not grow with every view
     // that ever existed, and so that a dead view's bind groups do not keep its
     // buffers alive.
-    bin_unpacking_bind_groups
+    caches.bin_unpacking
         .retain(|key, _| scene_unpacking_buffers.view_phase_buffers.contains_key(key));
-    uniform_allocation_bind_groups
+    caches.uniform_allocation
         .retain(|key, _| scene_unpacking_buffers.view_phase_buffers.contains_key(key));
 }
 
