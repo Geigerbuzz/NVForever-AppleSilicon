@@ -338,6 +338,7 @@ impl Plugin for FrameGenPlugin {
 /// `STORAGE_READ_WITHOUT_FORMAT` and `STORAGE_WRITE_WITHOUT_FORMAT` in `VkFormatProperties3`
 /// [documented: Vulkan spec, the SPIR-V environment appendix's capability table and the
 /// dispatch commands' `OpTypeImage` valid usage]. The output is `Rgba16Float` ([`prepare`]).
+#[cfg(not(target_vendor = "apple"))]
 fn storage_without_format(adapter: &wgpu::Adapter) -> bool {
     use ash::vk;
     // SAFETY: only reads through the hal adapter, which stays alive in the guard.
@@ -354,6 +355,13 @@ fn storage_without_format(adapter: &wgpu::Adapter) -> bool {
     // `VkFormatProperties3` 1.3 core, both checked above.
     unsafe { instance.raw_instance().get_physical_device_format_properties2(hal.raw_physical_device(), vk::Format::R16G16B16A16_SFLOAT, &mut properties) };
     properties3.optimal_tiling_features.contains(vk::FormatFeatureFlags2::STORAGE_READ_WITHOUT_FORMAT | vk::FormatFeatureFlags2::STORAGE_WRITE_WITHOUT_FORMAT)
+}
+
+/// Metal declares the read/write formats its shaders use, so FSR's images never take the
+/// Vulkan-only "without format" route ([`storage_without_format`]).
+#[cfg(target_vendor = "apple")]
+fn storage_without_format(_adapter: &wgpu::Adapter) -> bool {
+    false
 }
 
 /// Turns latency reduction on with frame generation and sets the real-frame cap.

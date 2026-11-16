@@ -1,4 +1,4 @@
-#[cfg(feature = "raw_vulkan_init")]
+#[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
 pub mod raw_vulkan_init;
 mod render_context;
 mod render_device;
@@ -200,7 +200,7 @@ pub async fn initialize_renderer(
     backends: Backends,
     primary_window: Option<RawHandleWrapperHolder>,
     options: &WgpuSettings,
-    #[cfg(feature = "raw_vulkan_init")]
+    #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
     raw_vulkan_init_settings: raw_vulkan_init::RawVulkanInitSettings,
 ) -> RenderResources {
     let instance_descriptor = wgpu::InstanceDescriptor {
@@ -229,14 +229,14 @@ pub async fn initialize_renderer(
         },
     };
 
-    #[cfg(not(feature = "raw_vulkan_init"))]
+    #[cfg(any(not(feature = "raw_vulkan_init"), target_vendor = "apple"))]
     let instance = Instance::new(instance_descriptor);
-    #[cfg(feature = "raw_vulkan_init")]
+    #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
     let mut additional_vulkan_features = raw_vulkan_init::AdditionalVulkanFeatures::default();
     // NVForever (2026-11-09): the raw Vulkan instance only when the backends include Vulkan;
     // otherwise `Instance::new`, as without the feature, so `WGPU_BACKEND=dx12` or `gl` is
     // honoured. Upstream creates the raw Vulkan instance whatever the backends say.
-    #[cfg(feature = "raw_vulkan_init")]
+    #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
     let instance = if backends.contains(Backends::VULKAN) {
         raw_vulkan_init::create_raw_vulkan_instance(
             instance_descriptor,
@@ -367,10 +367,10 @@ pub async fn initialize_renderer(
         trace: Trace::Off,
     };
 
-    #[cfg(not(feature = "raw_vulkan_init"))]
+    #[cfg(any(not(feature = "raw_vulkan_init"), target_vendor = "apple"))]
     let (device, queue) = adapter.request_device(&device_descriptor).await.unwrap();
 
-    #[cfg(feature = "raw_vulkan_init")]
+    #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
     let (device, queue) = raw_vulkan_init::create_raw_device(
         &adapter,
         &device_descriptor,
@@ -389,7 +389,7 @@ pub async fn initialize_renderer(
         RenderAdapterInfo::new(adapter_info),
         RenderAdapter::new(adapter),
         RenderInstance::new(instance),
-        #[cfg(feature = "raw_vulkan_init")]
+        #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
         additional_vulkan_features,
     )
 }

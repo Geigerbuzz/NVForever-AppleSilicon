@@ -171,7 +171,7 @@ pub struct RenderResources(
     pub RenderAdapterInfo,
     pub RenderAdapter,
     pub RenderInstance,
-    #[cfg(feature = "raw_vulkan_init")] pub renderer::raw_vulkan_init::AdditionalVulkanFeatures,
+    #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))] pub renderer::raw_vulkan_init::AdditionalVulkanFeatures,
 );
 
 impl RenderResources {
@@ -199,7 +199,7 @@ impl RenderResources {
         main_world.insert_resource(render_adapter.clone());
         main_world.insert_resource(compressed_image_format_support);
 
-        #[cfg(feature = "raw_vulkan_init")]
+        #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
         {
             let additional_vulkan_features: renderer::raw_vulkan_init::AdditionalVulkanFeatures =
                 self.5;
@@ -235,7 +235,7 @@ impl RenderCreation {
         adapter_info: RenderAdapterInfo,
         adapter: RenderAdapter,
         instance: RenderInstance,
-        #[cfg(feature = "raw_vulkan_init")]
+        #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
         additional_vulkan_features: renderer::raw_vulkan_init::AdditionalVulkanFeatures,
     ) -> Self {
         RenderResources(
@@ -244,7 +244,7 @@ impl RenderCreation {
             adapter_info,
             adapter,
             instance,
-            #[cfg(feature = "raw_vulkan_init")]
+            #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
             additional_vulkan_features,
         )
         .into()
@@ -260,7 +260,7 @@ impl RenderCreation {
         &self,
         future_resources: FutureRenderResources,
         primary_window: Option<RawHandleWrapperHolder>,
-        #[cfg(feature = "raw_vulkan_init")]
+        #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
         raw_vulkan_init_settings: renderer::raw_vulkan_init::RawVulkanInitSettings,
     ) -> bool {
         match self {
@@ -278,7 +278,7 @@ impl RenderCreation {
                         backends,
                         primary_window,
                         &settings,
-                        #[cfg(feature = "raw_vulkan_init")]
+                        #[cfg(all(feature = "raw_vulkan_init", not(target_vendor = "apple")))]
                         raw_vulkan_init_settings,
                     )
                     .await;

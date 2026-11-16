@@ -73,9 +73,11 @@ mod eye_adapt;
 mod fog;
 mod fly;
 mod foot_ik;
+#[cfg_attr(target_vendor = "apple", path = "anti_lag_apple.rs")]
 mod anti_lag;
 mod dlss;
 mod dlss_download;
+#[cfg_attr(target_vendor = "apple", path = "nv_low_latency_apple.rs")]
 mod nv_low_latency;
 mod frame_pace;
 mod frame_telemetry;
