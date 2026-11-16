@@ -244,8 +244,10 @@ work in New Vegas.
   matches the wall's corner stones only as half extents, so the reading is not in doubt.
   The original tests multibounds only, so that sign would stay unless it belonged to
   one; per-mesh tests are not safe outdoors. `--occlusion-planes-outdoors` uses the
-  exterior planes too (for measuring). In the interiors checked, the pictures with and
-  without were the same.
+  exterior planes too: a supported opt-in, kept off by default for the reason above
+  (the Divide's linear exteriors have 7–10 planes each). The eye is the world view's
+  camera (`fly::WorldCamera`), so `--pos` screenshots and benchmarks test planes as
+  `--play` does. In the interiors checked, the pictures with and without were the same.
 
 ### 3.3 Distance, LOD and static collections
 
@@ -494,7 +496,7 @@ scripts, so picking one up is detected from a trigger with `GetHasNote`
 | T6 | "Physics sensors (5D)" | detection is the physics engine's collision | layer5.md §3.4 table already says physics sensors; the implementation is geometric | docs/design/layer5.md §3.4 vs layer5-play.md §3 | consistent with the plan, not with the interim code |
 | C1 | Room/portal culling | rooms, portals, unbounded space, portal frusta (§3.1) | built (#606): in interiors only the rooms seen through portals are drawn; membership by box overlap grown by 32 units, the narrower frustum a screen rectangle, everything drawn with the camera in no room (never the void); portals wholly behind an occlusion plane are not followed (C3); `--no-room-culling` turns it off | `engine/nvforever/src/rooms.rs`, smoke `rooms-repconn` | simplified (performance; the original can show "the void" where portals are missing, NVForever does not) |
 | C2 | Moved objects and rooms | a settled object is drawn only with its original room [Optimization] | dropped items, actors and effects are never room-culled; moved objects are always drawn | `engine/nvf-play/src/dropped.rs`, world.rs | difference (fidelity edge case) |
-| C3 | Multibounds and occlusion planes | per-frame occlusion test of multibounds against plane frusta [Occlusion] | built (#1434): occlusion planes in interiors hide the placed objects' meshes wholly behind one plane, each by its own bounds, and stop portals wholly behind one; outdoors only with `--occlusion-planes-outdoors` (a Primm plane pokes above its wall, §3.2); multibounds are not used (§13 question 8); `--no-occlusion-planes` turns it off | `engine/nvforever/src/occlusion.rs`, `rooms.rs`, smoke `occlusion-planes-vault21` | simplified (performance only; per-mesh bounds instead of multibounds) |
+| C3 | Multibounds and occlusion planes | per-frame occlusion test of multibounds against plane frusta [Occlusion] | built (#1434): occlusion planes in interiors hide the placed objects' meshes wholly behind one plane, each by its own bounds, and stop portals wholly behind one; exteriors with `--occlusion-planes-outdoors` (a supported opt-in: a Primm plane pokes above its wall, §3.2); the eye is the world view's camera, so `--pos` and `--play` cull alike; multibounds are not used (§13 question 8); `--no-occlusion-planes` turns it off | `engine/nvforever/src/occlusion.rs`, `rooms.rs`, smoke `occlusion-planes-vault21` | simplified (performance only; per-mesh bounds instead of multibounds) |
 | C4 | XPRM bounds | (room edges must meet; portals snap to faces) | physics.md §4.1: half extents [hypothesis] | `crates/fnv-phys/src/primitive.rs`, physics.md §4.1 | **settled by our data**: 1,298 of 1,341 portal centres on a room face as half extents, 0 as full extents (§3.1) |
 | C5 | Object fade by bounds | objects fade in at a distance growing with their bounds [Static Collections] | all objects of loaded cells are drawn at any distance; fades exist only per cell and for LOD | `engine/nvforever/src/fade.rs`, layer3.md §2.2 | difference |
 | L1 | Light radius | radius set per reference [Lighting] | range = base radius + `XRDS` (`placed_light_radius`); SSIM up on all seven interior frames (world.md §8) | `engine/nvforever/src/lights.rs`, `crates/fnv-world/src/lighting.rs`, world.md §8 | **settled** (2026-10-09) |

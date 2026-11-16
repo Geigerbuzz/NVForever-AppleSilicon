@@ -19,19 +19,26 @@
 //!   volume is convex, so the whole mesh is then behind that plane. Planes are not joined:
 //!   a mesh seen past the edge between two planes stays drawn.
 //! - **The eye on the plane** (closer than [`EYE_MIN`]): the plane hides nothing.
-//! - **Interiors only by default** [engineering choice]: the exterior planes are not all
-//!   inside their walls. At Primm, plane 0x00177B3D (z 5,776–6,256) lies in a retaining
-//!   wall whose mesh reaches z 6,168, so the plane stands 88 units above it and hid the
-//!   letters of a roof sign seen over it [observed, 2026-11-06 screenshots with and
-//!   without]. The original tests only multibounds against planes, which would not hide
-//!   that sign unless it were in one; per-mesh tests are not safe there. In the interiors
-//!   checked the planes fit their walls (RocketLabMid's tile one room's walls exactly,
-//!   level-design.md §3.2) and the pictures were the same. `--occlusion-planes-outdoors`
-//!   uses the exterior planes too, for measuring.
-//!
-//! `--no-occlusion-planes` turns it off everywhere; `NVF_PLAY_TEST_OCCLUSION_CYCLE=<seconds>` turns
-//! it off and on again every that many seconds of real time, to compare frame times in
-//! one run.
+//! - **The eye** is the world view's camera (`fly::WorldCamera`, read in `rooms.rs`): the
+//!   free camera of `--cell`/`--pos` runs, the same entity `--play` also marks
+//!   `PlayerCamera`. Reading only `PlayerCamera` left every screenshot, benchmark and
+//!   `--pos` run without an eye, so no plane was ever tested there (the 2026-11-16 Big MT
+//!   measurement). Play is unchanged: it is that same camera.
+//! - **Interiors by default, exteriors opt-in** [engineering choice]: the exterior planes
+//!   are not all inside their walls. At Primm, plane 0x00177B3D (z 5,776–6,256) lies in a
+//!   retaining wall whose mesh reaches z 6,168, so the plane stands 88 units above it and
+//!   hid the letters of a roof sign seen over it [observed, 2026-11-06 screenshots with
+//!   and without]. The original tests only multibounds against planes, which would not
+//!   hide that sign unless it were in one; per-mesh tests are not safe there. In the
+//!   interiors checked the planes fit their walls (RocketLabMid's tile one room's walls
+//!   exactly, level-design.md §3.2) and the pictures were the same.
+//!   `--occlusion-planes-outdoors` is the supported opt-in for exteriors, where planes
+//!   cover long linear sightlines (the Divide's exteriors have 7–10 each). It stays off
+//!   by default because a plane larger than its wall can hide what is seen past it — the
+//!   Primm case above — so it is turned on per worldspace after the pictures are checked.
+//!   `--no-occlusion-planes` turns planes off everywhere;
+//!   `NVF_PLAY_TEST_OCCLUSION_CYCLE=<seconds>` turns them off and on again every that many
+//!   seconds of real time, to compare frame times in one run.
 
 use crate::world::WorldData;
 use bevy::prelude::*;

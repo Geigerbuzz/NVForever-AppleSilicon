@@ -309,8 +309,10 @@ struct Args {
     /// Occlusion planes hide nothing (rooms.rs, occlusion.rs).
     #[arg(long)]
     no_occlusion_planes: bool,
-    /// Use the occlusion planes of exterior cells too (off by default: some poke out of
-    /// their walls and would hide what is seen over them; occlusion.rs).
+    /// Use the authored occlusion planes of exterior cells too (rooms.rs, occlusion.rs).
+    /// Off by default: some exterior planes stand above the wall they describe (the Primm
+    /// roof sign), and the per-mesh test would hide what is seen past them. On, it suits
+    /// the long linear exteriors with many planes (the Divide's have 7-10 each).
     #[arg(long)]
     occlusion_planes_outdoors: bool,
     /// Seconds a streamed cell takes to fade in or out against the distant LOD; 0 swaps

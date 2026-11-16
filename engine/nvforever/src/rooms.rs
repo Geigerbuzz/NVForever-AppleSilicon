@@ -31,13 +31,19 @@
 //! - **The narrower frustum** is a screen rectangle: a portal's corners projected, their
 //!   bounding rectangle cut by the rectangle the room was seen through. A portal with a
 //!   corner behind the camera passes the whole rectangle on (the camera is in or near it).
+//! - **The eye** is the world view's camera, [`crate::fly::WorldCamera`]: the free camera
+//!   `--cell`/`--pos` runs fly, which `--play` also marks `PlayerCamera` (the same entity,
+//!   so play is unchanged). Finding `PlayerCamera` here would leave every screenshot,
+//!   benchmark and `--pos` run with no eye at all, so rooms and planes would silently do
+//!   nothing there (the 2026-11-16 Big MT measurement, 3,994 refs at 16.67-18.32 ms).
 //! - **No room**: with the camera in no room (outside the boxes, in a cell without rooms,
-//!   or with no player camera), everything is drawn: never the void.
-//! - **Occlusion planes** (§3.2, `occlusion.rs`), in interiors (outdoors only with
-//!   `--occlusion-planes-outdoors`, see `occlusion.rs`): a mesh
-//!   wholly in the volume a plane hides from the eye is hidden too, and a portal wholly
-//!   in it is not followed. Multibounds are not used: each mesh is tested by its own
-//!   bounds (which references are multibounds in New Vegas is open, §13).
+//!   or with no world camera), everything is drawn: never the void.
+//! - **Occlusion planes** (§3.2, `occlusion.rs`), in interiors; in exteriors too with
+//!   `--occlusion-planes-outdoors` (a supported opt-in, off by default: see
+//!   `occlusion.rs`): a mesh wholly in the volume a plane hides from the eye is hidden
+//!   too, and a portal wholly in it is not followed. Multibounds are not used: each mesh
+//!   is tested by its own bounds (which references are multibounds in New Vegas is open,
+//!   §13).
 //!
 //! A culled mesh is moved to render layer [`CULL_LAYER`], which no camera or light sees;
 //! the meshes this module hides are marked [`RoomHidden`] and given back the default
@@ -495,7 +501,12 @@ fn cull(
     mut commands: Commands,
     time: Res<Time<Real>>,
     mut rooms: ResMut<Rooms>,
-    camera: Query<(&Camera, &GlobalTransform), With<nvf_play::PlayerCamera>>,
+    // The world view's camera (`fly::WorldCamera`), not `PlayerCamera`: that marker joins
+    // it only with `--play` (main.rs `setup`), so every `--cell`/`--pos` run — screenshots,
+    // benchmarks — used to find no eye here and every plane test silently did nothing
+    // (the 2026-11-16 Big MT window). The two are the same entity in `--play`, so play
+    // draws exactly what it did.
+    camera: Query<(&Camera, &GlobalTransform), crate::fly::WorldCamera>,
     mut meshes: Query<(Entity, &InRooms, &mut GameBounds, Ref<GlobalTransform>, &Aabb, Has<RoomHidden>, Option<&RenderLayers>)>,
 ) {
     let rooms = &mut *rooms;
@@ -716,5 +727,50 @@ mod tests {
         assert_eq!(portal_rect(&corners, &camera()), Some(FULL));
         let behind: Vec<Vec3> = corners.iter().map(|c| Vec3::new(-100.0 - c.x.abs(), c.y, c.z)).collect();
         assert_eq!(portal_rect(&behind, &camera()), None);
+    }
+
+    /// The eye is the world view's camera (`fly::WorldCamera`), which `--pos` runs fly and
+    /// `--play` marks `PlayerCamera` on the same entity. Reading only `PlayerCamera` left
+    /// every screenshot, benchmark and `--pos` run without an eye, so the planes hid
+    /// nothing there (the 2026-11-16 Big MT measurement, 3,994 refs at 16.67-18.32 ms).
+    #[test]
+    fn planes_use_the_world_camera_not_only_the_player_camera() {
+        // A wall plane at game x = 100 (the module's own wall) and a box wholly behind it.
+        let app_with = |fly_cam: bool| -> (App, Entity) {
+            let mut app = App::new();
+            app.init_resource::<Time<Real>>()
+                .insert_resource(Rooms { planes: vec![Plane::new(1, Vec3::new(100.0, 0.0, 0.0), Mat3::IDENTITY, Vec3::new(0.5, 100.0, 50.0))], ..default() })
+                .add_systems(Update, cull);
+            {
+                let mut cam = app.world_mut().spawn((Camera3d::default(), Transform::default()));
+                if fly_cam {
+                    cam.insert(crate::fly::FlyCam { yaw: 0.0, pitch: 0.0, speed: 800.0 });
+                }
+            }
+            let mesh = app
+                .world_mut()
+                .spawn((
+                    InRooms(Vec::new()),
+                    GameBounds(Vec3::new(150.0, -10.0, -10.0), Vec3::new(200.0, 10.0, 10.0)),
+                    // No `TransformPlugin` in this bare App: the world transform is given
+                    // directly (with propagation it would come from the `Transform`).
+                    GlobalTransform::from_xyz(175.0, 0.0, 0.0),
+                    Aabb::from_min_max(Vec3::new(-25.0, -10.0, -10.0), Vec3::new(25.0, 10.0, 10.0)),
+                ))
+                .id();
+            (app, mesh)
+        };
+
+        let (mut app, mesh) = app_with(true);
+        app.update();
+        assert!(app.world().entity(mesh).contains::<RoomHidden>(), "the free camera's plane hides the box behind it");
+        assert_eq!(app.world().entity(mesh).get::<RenderLayers>(), Some(&RenderLayers::layer(CULL_LAYER)));
+
+        // A camera that is not the world view is no eye: nothing is hidden, as when a menu's
+        // camera is the active one.
+        let (mut app, mesh) = app_with(false);
+        app.update();
+        assert!(!app.world().entity(mesh).contains::<RoomHidden>(), "no world camera: nothing hidden");
+        assert!(app.world().entity(mesh).get::<RenderLayers>().is_none());
     }
 }
