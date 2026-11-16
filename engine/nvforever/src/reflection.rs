@@ -39,6 +39,17 @@
 //! own set of the sun's cascades stays: Bevy's renderer needs cascades for every view the
 //! sun lights, and emptying their caster lists saved 0.12 ms of shadow-pass GPU time and
 //! nothing of the frame there, so the reflected world keeps its shadows.
+//!
+//! Rendering it is the frame's largest single item where water is seen (a whole scene again:
+//! about 1.0-1.6 ms at 1280x800 and 5.5-7.5 ms at the display's 3024x1898 on this machine,
+//! plus the second view's CPU [inference, reports/exp-water.md]), and none of it is visible
+//! where the water shows no reflection at all or is too far to read one. Three gates keep it
+//! out of those frames: water whose material shows no reflection (a placed PWAT without
+//! "Reflects", #1780: the Ultra-Luxe fountain, the Goodsprings Source trough) never turns the
+//! camera on; water on screen only past [`MIRROR_RANGE`] keeps the sky gradient; and between
+//! sightings the camera renders on every other frame ([`STRIDE`]), the water sampling the
+//! texture drawn last. The texture also has a longest side ([`MAX_SIDE`]), so a 4K window
+//! does not pay for a 4K second view.
 
 use crate::water::{DistantWater, WaterCache, WaterMaterial};
 use crate::world::{bevy_to_game, Streamer, WorldData};
@@ -65,6 +76,28 @@ pub const WATER_LAYER: usize = 1;
 /// The reflection texture's size relative to the window.
 const SCALE: u32 = 2;
 
+/// The reflection texture's longest side, in pixels: a window whose half is wider than this
+/// draws the mirrored view at this size and stretches it. The reflection is wave-distorted,
+/// half-contrast and sampled through a screen-space offset, so a stretched one is hard to
+/// tell from a native one, while at 3024x1898 it saves 28 % of the second view's fill
+/// [engineering choice; check with a still at 3024x1898].
+const MAX_SIDE: u32 = 1280;
+
+/// Render the mirrored view every [`STRIDE`]th frame and let the water sample the texture
+/// drawn last in between. One frame of lag: at 120 Hz the reflection is 8 ms old, which on a
+/// fast turn trails the scene by about 0.7° of yaw (100°/s) and on the nearest reflected
+/// object by about a texel at walking speed. 1 draws it every frame, as before
+/// [engineering choice; 2 halves the second view's GPU and CPU cost].
+const STRIDE: u64 = 2;
+
+/// The water within this distance (game units: about 114 m) of the camera is what the
+/// mirrored view is for. Farther water keeps the sky gradient and the sun's glint that it
+/// shows with the mirror switched off (`--graphics-only no-water-mirror`): at that distance
+/// its reflection is a band a few pixels tall, compressed by the grazing angle
+/// [engineering choice; water.wesl mixes to the sky from here to 1.5x this, so a lake edge
+/// crossing it does not switch].
+const MIRROR_RANGE: f32 = 8_000.0;
+
 /// Cells (in grid steps from the camera's cell) searched for the water to reflect in.
 const SEARCH: i32 = 2;
 
@@ -87,7 +120,7 @@ pub struct ReflectionPlugin;
 
 impl Plugin for ReflectionPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<WaterPixels>().add_systems(Startup, setup_reflection).add_systems(
+        app.init_resource::<WaterPixels>().init_resource::<Stale>().add_systems(Startup, setup_reflection).add_systems(
             PostUpdate,
             (resize_reflection, read_water_pixels, update_reflection)
                 .chain()
@@ -101,11 +134,16 @@ impl Plugin for ReflectionPlugin {
 }
 
 fn texture_size(window: &Window) -> Extent3d {
-    Extent3d {
-        width: (window.physical_width() / SCALE).max(1),
-        height: (window.physical_height() / SCALE).max(1),
-        depth_or_array_layers: 1,
+    let (mut width, mut height) = ((window.physical_width() / SCALE).max(1), (window.physical_height() / SCALE).max(1));
+    // Keep the aspect while no side is longer than MAX_SIDE.
+    if width > MAX_SIDE {
+        height = ((height as u64 * MAX_SIDE as u64 / width as u64) as u32).max(1);
+        width = MAX_SIDE;
+    } else if height > MAX_SIDE {
+        width = ((width as u64 * MAX_SIDE as u64 / height as u64) as u32).max(1);
+        height = MAX_SIDE;
     }
+    Extent3d { width, height, depth_or_array_layers: 1 }
 }
 
 fn setup_reflection(mut commands: Commands, mut images: ResMut<Assets<Image>>, window: Query<&Window, With<PrimaryWindow>>) {
@@ -143,6 +181,7 @@ fn resize_reflection(
     window: Query<&Window, With<PrimaryWindow>>,
     reflection: Option<Res<Reflection>>,
     mut images: ResMut<Assets<Image>>,
+    mut stale: ResMut<Stale>,
 ) {
     if resized.read().last().is_none() {
         return;
@@ -152,9 +191,17 @@ fn resize_reflection(
     if let Some(mut img) = images.get_mut(&r.image) {
         if img.texture_descriptor.size != size {
             img.resize(size);
+            // What the new texture holds is undefined until the camera draws into it.
+            stale.0 = true;
         }
     }
 }
+
+/// The reflection image was made again (a resize): what it holds is undefined until the
+/// camera draws into it, so the next frame renders whatever [`STRIDE`] says
+/// ([`update_reflection`]).
+#[derive(Resource, Default)]
+struct Stale(bool);
 
 /// What the GPU's count of drawn water pixels (#1060, module notes) last said.
 #[derive(Resource, Default, Debug)]
@@ -211,7 +258,13 @@ fn read_water_pixels(mut commands: Commands, cache: Res<WaterCache>, mut px: Res
 type PlacedWater<'w, 's> = Query<
     'w,
     's,
-    (&'static GlobalTransform, &'static Aabb, &'static RefVisual, &'static InheritedVisibility),
+    (
+        &'static GlobalTransform,
+        &'static Aabb,
+        &'static RefVisual,
+        &'static InheritedVisibility,
+        &'static MeshMaterial3d<WaterMaterial>,
+    ),
     (With<MeshMaterial3d<WaterMaterial>>, Without<ReflectionCamera>),
 >;
 
@@ -228,21 +281,23 @@ enum SeenWater {
 const SAME_HEIGHT: f32 = 1.0;
 
 /// The first water at height `h` (game z) that some part of lies inside the main
-/// camera's view (`clip_from_world`, Bevy space): the part of every loaded cell and every
-/// distant-water cell where the water stands above the land ([`DistantWater::wet_area`],
-/// so planes under the ground never count), and placed water
-/// objects whose bounds reach that height. Water at another height reflects only the sky
-/// and does not need the camera. What hides it from view (a hill, a wall) is not taken
-/// into account.
+/// camera's view (`clip_from_world`, Bevy space), and how far its nearest part is from the
+/// camera (game units): the part of every loaded cell and every distant-water cell where the
+/// water stands above the land ([`DistantWater::wet_area`], so planes under the ground never
+/// count), and placed water objects whose bounds reach that height. Water at another height
+/// reflects only the sky and does not need the camera. What hides it from view (a hill, a
+/// wall) is not taken into account.
+#[allow(clippy::too_many_arguments)]
 fn water_on_screen(
     world: &WorldData,
     streamer: &Streamer,
     dw: &mut DistantWater,
     placed: &PlacedWater,
+    materials: &Assets<WaterMaterial>,
     clip_from_world: Mat4,
     h: f32,
     cam: Vec3,
-) -> Option<SeenWater> {
+) -> Option<(SeenWater, f32)> {
     // Nearest first, so the water named is the same every run (the maps' order is not).
     let g = bevy_to_game(cam);
     let cells = nearest_first(streamer.loaded.keys().copied().chain(dw.plane_cells()), cell_of(g.x, g.y));
@@ -252,26 +307,38 @@ fn water_on_screen(
             continue;
         }
         let Some(wet) = dw.wet_area(world, c) else { continue };
-        if polygon_in_view(clip_from_world, &wet_quad(wet, height)) {
-            return Some(SeenWater::Cell(c));
+        let quad = wet_quad(wet, height);
+        if polygon_in_view(clip_from_world, &quad) {
+            return Some((SeenWater::Cell(c), quad_distance(&quad, cam)));
         }
     }
-    placed_water_on_screen(placed.iter().map(|(t, aabb, r, v)| (t.affine(), aabb, r.0, v.get())), clip_from_world, h, cam)
+    placed_water_on_screen(
+        placed.iter().map(|(t, aabb, r, v, m)| {
+            // The material's reflectivity is 0 for water that shows no reflection at all (a
+            // placed PWAT without "Reflects": water.rs `water_material`, #1780): the shader
+            // weights the whole reflection by it, so that water never needs the camera.
+            let reflects = materials.get(&m.0).is_some_and(|m| m.params.surface.x > 0.0);
+            (t.affine(), aabb, r.0, v.get(), reflects)
+        }),
+        clip_from_world,
+        h,
+        cam,
+    )
 }
 
 /// The nearest placed water object (to `cam`, Bevy space; the lower FormID on a tie) that
-/// is drawn, reaches height `h` and lies partly inside the view: each as its transform,
-/// bounds, reference and whether it is visible (an object hidden or on a disabled
-/// reference never counts, #1059).
+/// is drawn, shows a reflection (`reflects`), reaches height `h` and lies partly inside the
+/// view: each as its transform, bounds, reference, whether it is visible (an object hidden or
+/// on a disabled reference never counts, #1059) and whether its material reflects.
 fn placed_water_on_screen<'a>(
-    placed: impl Iterator<Item = (bevy::math::Affine3A, &'a Aabb, u32, bool)>,
+    placed: impl Iterator<Item = (bevy::math::Affine3A, &'a Aabb, u32, bool, bool)>,
     clip_from_world: Mat4,
     h: f32,
     cam: Vec3,
-) -> Option<SeenWater> {
+) -> Option<(SeenWater, f32)> {
     let mut best: Option<(f32, u32)> = None;
-    for (m, aabb, r, visible) in placed {
-        if !visible {
+    for (m, aabb, r, visible, reflects) in placed {
+        if !visible || !reflects {
             continue;
         }
         let (c, e) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
@@ -296,7 +363,24 @@ fn placed_water_on_screen<'a>(
             }
         }
     }
-    best.map(|(_, f)| SeenWater::Placed(f))
+    best.map(|(d, f)| (SeenWater::Placed(f), d.sqrt()))
+}
+
+/// The distance from `cam` (Bevy space) to the nearest point of the horizontal quad
+/// `points` (its corners, as [`wet_quad`] builds them): the horizontal gap to its box plus
+/// the height difference, so water 100 units below the camera is 100 units away where the
+/// camera stands over it.
+fn quad_distance(points: &[Vec3; 4], cam: Vec3) -> f32 {
+    let (mut lo_x, mut hi_x) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut lo_z, mut hi_z) = (f32::INFINITY, f32::NEG_INFINITY);
+    for p in points {
+        (lo_x, hi_x) = (lo_x.min(p.x), hi_x.max(p.x));
+        (lo_z, hi_z) = (lo_z.min(p.z), hi_z.max(p.z));
+    }
+    let dx = (lo_x - cam.x).max(cam.x - hi_x).max(0.0);
+    let dz = (lo_z - cam.z).max(cam.z - hi_z).max(0.0);
+    let dy = points[0].y - cam.y;
+    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 /// `cells` without repeats, nearest `centre` first (by grid steps both ways, then the
@@ -397,6 +481,17 @@ fn no_reflection() -> bool {
     *OFF.get_or_init(|| std::env::var("NVF_PLAY_TEST_NO_REFLECTION").is_ok_and(|v| v == "1"))
 }
 
+/// What [`update_reflection`] remembers between frames: the frame counter the render rate
+/// ([`STRIDE`]) counts on, whether water was in range last frame (the first frame of a
+/// sighting always draws), and whether the water's look was on last frame (so the log says
+/// it when it changes, not on every rendered or skipped frame).
+#[derive(Default)]
+struct Gate {
+    frame: u64,
+    in_range: bool,
+    said: bool,
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_reflection(
     world: Res<WorldData>,
@@ -414,7 +509,9 @@ fn update_reflection(
     time: Res<Time<Real>>,
     hidden: Option<Res<crate::console_toggles::Hidden>>,
     pixels: Res<WaterPixels>,
+    mut stale: ResMut<Stale>,
     mut unseen_for: Local<f32>,
+    mut gate: Local<Gate>,
 ) {
     let (Ok((main_gt, main_proj, main_fog)), Ok((mut camera, mut t, mut gt, mut proj, mut fog))) = (main.single(), refl.single_mut())
     else {
@@ -433,29 +530,51 @@ fn update_reflection(
     cache.set_seen_plane(&mut materials, near_water.map_or(Vec4::ZERO, |h| Vec4::new(h, 1.0, 0.0, 0.0)));
     let seen = near_water.filter(|_| water_drawn && pixels.may_be_drawn(time.elapsed_secs())).and_then(|h| {
         let clip_from_world = main_proj.get_clip_from_view() * main_gt.to_matrix().inverse();
-        water_on_screen(&world, &streamer, &mut dw, &placed, clip_from_world, h, cam)
+        water_on_screen(&world, &streamer, &mut dw, &placed, &materials, clip_from_world, h, cam)
     });
-    if seen.is_some() {
+    // What the mirrored view is for is water near enough to read a reflection in. Water
+    // only past [`MIRROR_RANGE`] keeps the sky gradient and the sun's glint the shader
+    // gives it with the mirror off (water.wesl), so the camera does not render for it.
+    let near = seen.filter(|&(_, distance)| distance <= MIRROR_RANGE);
+    if near.is_some() {
         *unseen_for = 0.0;
     } else {
         *unseen_for += time.delta_secs();
     }
-    let height = near_water.filter(|_| seen.is_some() || (camera.is_active && *unseen_for <= KEEP_UNSEEN));
+    // The texture stays good for [`KEEP_UNSEEN`] after the last sighting, so turning along
+    // the edge of a lake does not switch the water's look on and off; the camera may render
+    // on only some of those frames ([`STRIDE`]).
+    let alive = near.is_some() || (near_water.is_some() && *unseen_for <= KEEP_UNSEEN);
+    let height = near_water.filter(|_| alive);
     let height = height.filter(|_| !no_reflection());
-    // z: screen-space reflections stand in where this plane is not (graphics.rs).
+    // z: screen-space reflections stand in where this plane is not (graphics.rs); w: the
+    // distance past which the shader takes the sky in its place ([`MIRROR_RANGE`]).
     let ssr = if graphics.is_some_and(|g| g.water_reflections) { 1.0 } else { 0.0 };
     let plane = match height {
-        Some(h) => Vec4::new(h, 1.0, ssr, 0.0),
-        None => Vec4::new(0.0, 0.0, ssr, 0.0),
+        Some(h) => Vec4::new(h, 1.0, ssr, MIRROR_RANGE),
+        None => Vec4::new(0.0, 0.0, ssr, MIRROR_RANGE),
     };
     cache.set_reflection_plane(&mut materials, plane);
-    if camera.is_active != height.is_some() {
-        camera.is_active = height.is_some();
+    // Draw it at most every [`STRIDE`]th frame, and always on the frame the water comes back
+    // into range (or the image was made again), so the water never samples a texture that was
+    // not drawn for the plane it shows; between renders it samples the one drawn last.
+    gate.frame = gate.frame.wrapping_add(1);
+    let first = near.is_some() && !gate.in_range;
+    gate.in_range = near.is_some();
+    let resized = std::mem::take(&mut stale.0);
+    let render = height.is_some() && near.is_some() && (first || resized || gate.frame.is_multiple_of(STRIDE));
+    if camera.is_active != render {
+        camera.is_active = render;
+    }
+    // Say what the water shows when that changes, not on every rendered or skipped frame.
+    if gate.said != height.is_some() {
+        gate.said = height.is_some();
         match (height, seen) {
-            (Some(_), Some(SeenWater::Cell(c))) => info!("water reflection: on (the water of cell {},{} on screen)", c.0, c.1),
-            (Some(_), Some(SeenWater::Placed(r))) => info!("water reflection: on (placed water {r:08X} on screen)"),
+            (Some(_), Some((SeenWater::Cell(c), _))) => info!("water reflection: on (the water of cell {},{} on screen)", c.0, c.1),
+            (Some(_), Some((SeenWater::Placed(r), _))) => info!("water reflection: on (placed water {r:08X} on screen)"),
             (Some(_), None) => {}
             (None, _) if !mirror => info!("water reflection: off (mirrored water switched off)"),
+            (None, Some((_, distance))) => info!("water reflection: off (the nearest water on screen is {distance:.0} units off, past {MIRROR_RANGE:.0})"),
             (None, _) if near_water.is_some() => info!("water reflection: off (no water on screen for {KEEP_UNSEEN} s)"),
             (None, _) => info!("water reflection: off (no water near)"),
         }
@@ -556,7 +675,8 @@ mod tests {
 
     /// #1059: placed water that is not drawn (a disabled reference, a hidden model) never
     /// switches the camera on; the same object drawn does. Of two drawn, the nearer one is
-    /// named (eb618878's choice).
+    /// named (eb618878's choice). Water whose material shows no reflection (#1780) is passed
+    /// over: the mirror is a whole scene again and that water cannot show it.
     #[test]
     fn hidden_placed_water_is_not_seen() {
         let eye = Vec3::new(0.0, 100.0, 0.0);
@@ -564,15 +684,38 @@ mod tests {
         let aabb = Aabb::from_min_max(Vec3::new(-500.0, -10.0, -500.0), Vec3::new(500.0, 0.0, 500.0));
         let near = bevy::math::Affine3A::from_translation(Vec3::new(0.0, 0.0, -3000.0));
         let far = bevy::math::Affine3A::from_translation(Vec3::new(0.0, 0.0, -6000.0));
-        let one = |visible| placed_water_on_screen(std::iter::once((near, &aabb, 0x1234, visible)), v, 0.0, eye);
-        assert_eq!(one(true), Some(SeenWater::Placed(0x1234)));
-        assert_eq!(one(false), None);
+        let one = |visible, reflects| placed_water_on_screen(std::iter::once((near, &aabb, 0x1234, visible, reflects)), v, 0.0, eye);
+        assert_eq!(one(true, true).map(|(s, _)| s), Some(SeenWater::Placed(0x1234)));
+        assert_eq!(one(false, true), None);
+        // Drawn but with no reflection in its material: the camera is not worth it.
+        assert_eq!(one(true, false), None);
+        // The distance is what the plane's water is from the camera (1,000 units to the
+        // box's near face, 100 above it).
+        let (_, d) = one(true, true).unwrap();
+        assert!((d - (3000.0f32 - 500.0).hypot(100.0)).abs() < 1.0, "distance {d}");
         // At another height: not the reflected plane's water.
-        assert_eq!(placed_water_on_screen(std::iter::once((near, &aabb, 0x1234, true)), v, 200.0, eye), None);
+        assert_eq!(placed_water_on_screen(std::iter::once((near, &aabb, 0x1234, true, true)), v, 200.0, eye), None);
         // The nearer of two drawn; a hidden nearer one is passed over for the farther.
-        let two = |near_visible| placed_water_on_screen([(far, &aabb, 0x1, true), (near, &aabb, 0x2, near_visible)].into_iter(), v, 0.0, eye);
-        assert_eq!(two(true), Some(SeenWater::Placed(0x2)));
-        assert_eq!(two(false), Some(SeenWater::Placed(0x1)));
+        let two = |near_visible| placed_water_on_screen([(far, &aabb, 0x1, true, true), (near, &aabb, 0x2, near_visible, true)].into_iter(), v, 0.0, eye);
+        assert_eq!(two(true).map(|(s, _)| s), Some(SeenWater::Placed(0x2)));
+        assert_eq!(two(false).map(|(s, _)| s), Some(SeenWater::Placed(0x1)));
+    }
+
+    /// The distance to the water is measured from its nearest part, not its centre: a lake
+    /// 4,096 units across whose near edge is in front of the camera is not 4,096 units away,
+    /// and one whose far edge is behind it is not closer than its near edge.
+    #[test]
+    fn a_quad_is_measured_from_its_nearest_point() {
+        let cam = Vec3::new(0.0, 100.0, 500.0);
+        // A cell's water from game y -4096..0 (Bevy z 0..4096), 100 below the camera, which
+        // stands over it: 100 units away.
+        let under = wet_quad([-2048.0, -4096.0, 2048.0, 0.0], 0.0);
+        assert!((quad_distance(&under, cam) - 100.0).abs() < 0.01, "{}", quad_distance(&under, cam));
+        // A cell whose near edge is 400 units ahead (Bevy z 900..5000): the near edge, not
+        // the centre, is what counts.
+        let ahead = wet_quad([-2048.0, -5000.0, 2048.0, -900.0], 0.0);
+        let d = quad_distance(&ahead, cam);
+        assert!((d - 400.0f32.hypot(100.0)).abs() < 1.0, "{d}");
     }
 
     /// #1060: the counter only grows; water was drawn between two readbacks when it

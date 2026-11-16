@@ -44,7 +44,9 @@ struct WaterParams {
     // per layer: uv velocity (per second), 1 / uv scale (per world unit), amplitude
     layers: array<vec4<f32>, 3>,
     // x = Bevy y of the plane the reflection texture shows, y = 1 when it is in use,
-    // z = 1 when screen-space reflections stand in where it is not (enhanced graphics)
+    // z = 1 when screen-space reflections stand in where it is not (enhanced graphics),
+    // w = the distance past which the sky gradient takes the mirrored view's place
+    // (reflection.rs MIRROR_RANGE: the camera does not render for water past it)
     reflection_plane: vec4<f32>,
     // ripple grid: game x, y of its corner, units per cell, height scale (0: none)
     ripple: vec4<f32>,
@@ -352,7 +354,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         let world_reflection = textureSampleLevel(reflection_texture, reflection_sampler, clamp(uv, vec2(0.0), vec2(1.0)), 0.0).rgb;
         let mirror_here = water.reflection_plane.y > 0.5 && abs(pos.y - water.reflection_plane.x) < 2.0;
-        let sky = select(sky_colour(R.y), world_reflection, mirror_here);
+        // Distant water takes the sky gradient (`reflection_plane.w`: the mirror range,
+        // reflection.rs): the camera does not render for water past it, and at that distance
+        // the mirrored view is a band a few pixels tall, compressed by the grazing angle.
+        let sky_gradient = sky_colour(R.y);
+        let far = clamp((dist - water.reflection_plane.w) / max(0.5 * water.reflection_plane.w, 1.0), 0.0, 1.0);
+        let sky = select(sky_gradient, mix(world_reflection, sky_gradient, far), mirror_here);
         if !mirror_here && water.reflection_plane.z > 0.5 && water.reflection.a > 0.5 {
             traced = ssr(pos, R);
         }

@@ -29,10 +29,17 @@
 //! every cascade every frame.
 //!
 //! What it costs and saves: docs/design/frame-rate-audit.md §9 and §10.
+//!
+//! The water's reflection camera (reflection.rs) is a view too, and one that renders on only
+//! some frames ([`crate::reflection`] STRIDE): it is left out of [`same_layout`], or its every
+//! other frame presence would read as a changed set of views and stop every cascade from being
+//! kept — the schedule would then draw all three cascades every frame, in the main view as
+//! well.
 
 use crate::fly::FlyCam;
+use crate::reflection::ReflectionCamera;
 use crate::sky::SkyState;
-use bevy::ecs::entity::EntityHashMap;
+use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
 use bevy::light::{Cascades, DirectionalLight, DirectionalLightShadowMap, NotShadowCaster, SimulationLightSystems};
 use bevy::pbr::HoldDirectionalShadowMaps;
 use bevy::prelude::*;
@@ -190,13 +197,13 @@ pub fn held_mask(schedule: &[(u32, u32)], frame: u64, cascades: usize) -> u32 {
 }
 
 /// Whether the cascades kept from earlier frames can stand in for this frame's: every
-/// light has kept cascades for the same views, as many of them.
-fn same_layout(kept: &EntityHashMap<Cascades>, now: &[(Entity, &Cascades)]) -> bool {
+/// light has kept cascades for the same views, as many of them, leaving out `skip` (the water
+/// reflection camera, which renders on only some frames).
+fn same_layout(kept: &EntityHashMap<Cascades>, now: &[(Entity, &Cascades)], skip: &EntityHashSet) -> bool {
     !now.is_empty()
         && now.iter().all(|(light, cascades)| {
             kept.get(light).is_some_and(|k| {
-                k.cascades.len() == cascades.cascades.len()
-                    && cascades.cascades.iter().all(|(view, c)| k.cascades.get(view).is_some_and(|kc| kc.len() == c.len()))
+                cascades.cascades.iter().filter(|(view, _)| !skip.contains(*view)).all(|(view, c)| k.cascades.get(view).is_some_and(|kc| kc.len() == c.len()))
             })
         })
 }
@@ -212,11 +219,13 @@ fn staggered() -> bool {
 /// the directional lights back those cascades as the frame that drew them had them, and
 /// have the renderer keep their maps (module notes). Runs after Bevy has built this
 /// frame's cascades and before it fits the lights' frusta to them.
+#[allow(clippy::too_many_arguments)]
 fn hold_cascades(
     on: Res<PerformanceShadows>,
     map: Option<Res<DirectionalLightShadowMap>>,
     mut hold: ResMut<HoldDirectionalShadowMaps>,
     mut lights: Query<(Entity, &mut Cascades), With<DirectionalLight>>,
+    mirrors: Query<Entity, With<ReflectionCamera>>,
     mut kept: Local<EntityHashMap<Cascades>>,
     mut frame: Local<u64>,
     mut said: Local<Option<bool>>,
@@ -230,10 +239,13 @@ fn hold_cascades(
         &[]
     };
     let count = lights.iter().flat_map(|(_, c)| c.cascades.values().map(Vec::len)).max().unwrap_or(0);
+    // The reflection camera's view comes and goes with its render rate: it must not be read
+    // as a change of the lights' layout (module notes).
+    let mirror_views: EntityHashSet = mirrors.iter().collect();
     // A new map size makes new maps: nothing to keep.
     let same_maps = !map.is_some_and(|m| m.is_changed());
     let mut mask = held_mask(schedule, *frame, count);
-    if mask != 0 && !(same_maps && same_layout(&kept, &lights.iter().collect::<Vec<_>>())) {
+    if mask != 0 && !(same_maps && same_layout(&kept, &lights.iter().collect::<Vec<_>>(), &mirror_views)) {
         mask = 0;
     }
     if mask == 0 {
@@ -308,16 +320,26 @@ mod tests {
     fn maps_are_held_only_for_the_same_lights_and_cascades() {
         let (sun, arms, view) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap(), Entity::from_raw_u32(3).unwrap());
         let (three, two) = (cascades(view, 3), cascades(view, 2));
+        let none = EntityHashSet::default();
         let mut kept = EntityHashMap::default();
         kept.insert(sun, three.clone());
-        assert!(same_layout(&kept, &[(sun, &three)]));
+        assert!(same_layout(&kept, &[(sun, &three)], &none));
         // Never without lights.
-        assert!(!same_layout(&kept, &[]));
+        assert!(!same_layout(&kept, &[], &none));
         // A light that was not there (the arms' shade light switching on), a different
         // number of cascades, or another view: this frame draws.
-        assert!(!same_layout(&kept, &[(sun, &three), (arms, &three)]));
-        assert!(!same_layout(&kept, &[(sun, &two)]));
-        assert!(!same_layout(&kept, &[(sun, &cascades(arms, 3))]));
+        assert!(!same_layout(&kept, &[(sun, &three), (arms, &three)], &none));
+        assert!(!same_layout(&kept, &[(sun, &two)], &none));
+        assert!(!same_layout(&kept, &[(sun, &cascades(arms, 3))], &none));
+        // The water's reflection camera comes and goes with its render rate: left out, the
+        // layout is unchanged and the cascades stay held (reflection.rs STRIDE).
+        let mut both = three.clone();
+        both.cascades.insert(arms, vec![Cascade::default(); 3]);
+        let mut skip = EntityHashSet::default();
+        skip.insert(arms);
+        assert!(same_layout(&kept, &[(sun, &both)], &skip));
+        // A view that is not the mirror still counts.
+        assert!(!same_layout(&kept, &[(sun, &both)], &none));
     }
 
     /// The switch gives back the cascade count it replaced (#2182 review: it reset a
