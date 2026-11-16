@@ -28,7 +28,7 @@ use bevy_ecs::{
     query::{Has, Or, With, Without},
     resource::Resource,
     schedule::{common_conditions::any_match_filter, IntoScheduleConfigs as _},
-    system::{Commands, Query, Res, ResMut},
+    system::{Commands, Query, Res, ResMut, SystemParam},
     world::{FromWorld, World},
 };
 use bevy_log::warn_once;
