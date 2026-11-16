@@ -223,6 +223,14 @@ const MASTERS: [&str; 10] = [
     "CaravanPack.esm",
 ];
 
+/// The most loaded cells each way `--radius` gives: [`fnv_game::game::MAX_LOADED_RADIUS`],
+/// 8 (a 17 × 17 square). The costs grow with the square (memory, spawn time, the AI's
+/// high set), and `Game::scan_cells` clamps a depth to the same 8, so a larger radius
+/// would also leave the reference walks unable to reach the whole loaded area. Above this
+/// the old engine silently broke anyway (the cell buffer was 36, less than the loaded
+/// square); the radius is clamped with a warning.
+const MAX_RADIUS: i32 = fnv_game::game::MAX_LOADED_RADIUS;
+
 /// NVForever: Fallout: New Vegas on your own game data.
 ///
 /// With no argument that chooses a world or a mode it opens on the main menu (as
@@ -263,7 +271,11 @@ struct Args {
     #[arg(long, default_value_t = -10.0, allow_hyphen_values = true)]
     pitch: f32,
     /// Cells loaded around the camera's cell in each direction (2: the 5 x 5 cells of
-    /// the game's uGridsToLoad=5, its default and the owner's INI value).
+    /// the game's uGridsToLoad=5, its default and the owner's INI value). This is the one
+    /// loaded-area number: the renderer draws it, `Game::cells_around` loads the same
+    /// square for scripts (OnLoad, HasLoaded3D, GetFirstRef, triggers, the compass,
+    /// respawns) and the AI processes it; `GetGridsToLoad` answers `2r + 1`. At most
+    /// [`MAX_RADIUS`].
     #[arg(long, default_value_t = 2)]
     radius: i32,
     /// Time of day in hours (0-24).
@@ -957,6 +969,13 @@ fn main() -> AppExit {
         }
     }
     let mut args = Args::parse_from(&line);
+    // One number for the loaded area (drawing, scripts and AI): keep it in the range the
+    // engine's budgets were built for. At the default 2 nothing changes.
+    if !(0..=MAX_RADIUS).contains(&args.radius) {
+        let r = args.radius.clamp(0, MAX_RADIUS);
+        eprintln!("warning: --radius {}: the loaded area is 0 to {MAX_RADIUS} cells each way; using {r}", args.radius);
+        args.radius = r;
+    }
     let _ = COMMAND_LINE.set(line);
     // Taking over a load: tell the old run at once that this run takes part (#1903).
     let handoff_marked = args.handoff.as_deref().map(handoff::mark_started);
@@ -1584,7 +1603,9 @@ fn main() -> AppExit {
             .collect(),
         manage_actors: residents.as_ref().is_some_and(|r| r.all),
         stats: Default::default(),
-        buffer: Default::default(),
+        // The AI's Mid-High set follows the loaded square (`cell_buffer::exterior_cells`):
+        // never smaller than the cells drawn, so none is evicted while in view.
+        buffer: crate::cell_buffer::CellBuffer::new(args.radius),
         centre: None,
         waiting: Vec::new(),
         model_overrides: Default::default(),
@@ -1704,7 +1725,10 @@ fn main() -> AppExit {
         // Streaming follows the camera, which the player systems move: stream after them.
         // The loading screen sends the travel in the Input set and reads in `Last` whether
         // the renderer is done: both this frame.
-        app.add_plugins(nvf_play::PlayPlugin(data))
+        // The loaded area's one number, before the plugin builds its script state: the
+        // game loads for scripts the square the streamer draws (nvf_play::LoadedRadius).
+        app.insert_resource(nvf_play::LoadedRadius(args.radius))
+            .add_plugins(nvf_play::PlayPlugin(data))
             .add_systems(Update, (worldspace::switch, world::travel, world::cell_image_space, world::cell_lighting).chain().after(nvf_play::PlaySet::Input).before(world::stream).before(sky::weather_region))
             .add_plugins(pipeline_gate::PipelineGatePlugin)
             .add_systems(Update, world::loading_gate.after(world::stream))

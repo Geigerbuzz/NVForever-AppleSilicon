@@ -256,6 +256,11 @@ pub struct ScriptState {
     /// Test aid `NVF_PLAY_TEST_MOD_LOG` (`crate::mod_log`): how the mods loaded and what
     /// their scripts met, in the log; none when the aid is off.
     pub mod_log: Option<crate::mod_log::ModLog>,
+    /// The loaded area's radius the engine streams (`nvforever --radius`,
+    /// [`crate::LoadedRadius`]): the cells `Game::cells_around` loads are the cells the
+    /// renderer draws and the AI processes [documented: uGridsToLoad]. 2, the original's
+    /// 5 × 5, when the engine says nothing.
+    loaded_radius: i32,
 }
 
 /// A save's game snapshot for the runtime to restore when it is made (`crate::save`).
@@ -347,7 +352,7 @@ pub struct TickStats {
 }
 
 impl ScriptState {
-    fn new(d: PlayData, refs: &'static RefTable, new_game: bool, unattended: bool, no_messages: bool) -> ScriptState {
+    fn new(d: PlayData, refs: &'static RefTable, new_game: bool, unattended: bool, no_messages: bool, loaded_radius: i32) -> ScriptState {
         let off = match std::env::var("NVF_PLAY_SCRIPTS").as_deref() {
             Ok("0") | Ok("off") | Ok("false") => Some("NVF_PLAY_SCRIPTS=0".to_string()),
             _ => None,
@@ -397,7 +402,7 @@ impl ScriptState {
         let write = (!unattended || own_home).then(|| fnv_install::EngineHome::default_root().map(|r| fnv_install::EngineHome::new(r).mods())).flatten();
         fnv_game::mod_files::update_roots(|r| r.write = write);
         let loader = off.is_none().then(|| Mutex::new(start_loading(d, refs)));
-        ScriptState { loader, rt: None, off, trace, aids, aids_started: false, gates: HashMap::new(), auto_close, no_messages, on_screen: None, walks: Vec::new(), new_game, start: GameStart::default(), used: Vec::new(), console: Vec::new(), console_out: Vec::new(), query_job: crate::query_job::QueryJob::from_env(), pending_game: None, held: false, mod_log: None }
+        ScriptState { loader, rt: None, off, trace, aids, aids_started: false, gates: HashMap::new(), auto_close, no_messages, on_screen: None, walks: Vec::new(), new_game, start: GameStart::default(), used: Vec::new(), console: Vec::new(), console_out: Vec::new(), query_job: crate::query_job::QueryJob::from_env(), pending_game: None, held: false, mod_log: None, loaded_radius }
     }
 
     /// The player answers the script's open menu: `Some(b)` picks button b (0 = first) of
@@ -644,12 +649,18 @@ fn inventory_sources(data: &GameData, sim: &SimState, game: &Game<'_>) -> std::c
 }
 
 impl Runtime {
-    fn new(data: &'static GameData, sim: &mut SimState, new_game: bool, packages: bool) -> Runtime {
+    fn new(data: &'static GameData, sim: &mut SimState, new_game: bool, packages: bool, loaded_radius: i32) -> Runtime {
         // Message boxes are menus until the player closes them (the default,
         // `GameConfig::modal_message_boxes`). With actors living by their packages, the
         // packages' scripts and idles run from the first frame (the residents ask for the
         // same interval when they start).
-        let cfg = GameConfig { frame_seconds: 1.0 / 60.0, package_interval: packages.then_some(PACKAGE_INTERVAL), ..GameConfig::default() };
+        let cfg = GameConfig {
+            frame_seconds: 1.0 / 60.0,
+            package_interval: packages.then_some(PACKAGE_INTERVAL),
+            // The area scripts load is the one the engine draws (`nvf_play::LoadedRadius`).
+            loaded_radius: loaded_radius.max(0),
+            ..GameConfig::default()
+        };
         let game = Game::new(data, World::new(sim.forms, sim.refs, sim.world.config()), cfg);
         // The simulation's world is the one played (`with_world`): its placed actors carry
         // their template's items too (template flag "Inventory"), each picked at the
@@ -1679,7 +1690,9 @@ impl Plugin for ScriptPlugin {
         let new_game = app.world().contains_resource::<NewGame>();
         let unattended = crate::test_aid::Unattended::from_env().0;
         let no_messages = app.world().contains_resource::<NoMessages>();
-        let mut st = ScriptState::new(d, refs, new_game, unattended, no_messages);
+        // The one loaded-area number: the engine's streamer radius, or the original's 5×5.
+        let loaded_radius = app.world().get_resource::<crate::LoadedRadius>().map_or(fnv_game::game::DEFAULT_LOADED_RADIUS, |r| r.0.max(0));
+        let mut st = ScriptState::new(d, refs, new_game, unattended, no_messages, loaded_radius);
         st.start = GameStart::of_app(app);
         app.insert_resource(st)
             .insert_resource(crate::pause::WorldAidClock::from_env())
@@ -1969,7 +1982,7 @@ pub(crate) fn run_scripts(
             }
             Some(Ok((data, secs))) => {
                 st.loader = None;
-                let mut rt = Runtime::new(data, &mut sim, st.new_game, play.0.packages);
+                let mut rt = Runtime::new(data, &mut sim, st.new_game, play.0.packages, st.loaded_radius);
                 // A save loaded later keeps the game's configuration (`Runtime::restore_save`).
                 rt.game.cfg.answer_ok_boxes = st.no_messages;
                 rt.start = st.start.clone();
@@ -2722,7 +2735,7 @@ impl ScriptState {
             choices_passed: None,
             activate_pick: None,
         };
-        ScriptState { loader: None, rt: Some(rt), off: None, trace: None, aids: Vec::new(), aids_started: false, gates: HashMap::new(), auto_close: None, no_messages: false, on_screen: None, walks: Vec::new(), new_game: false, start: GameStart::default(), used: Vec::new(), console: Vec::new(), console_out: Vec::new(), query_job: None, pending_game: None, held: false, mod_log: None }
+        ScriptState { loader: None, rt: Some(rt), off: None, trace: None, aids: Vec::new(), aids_started: false, gates: HashMap::new(), auto_close: None, no_messages: false, on_screen: None, walks: Vec::new(), new_game: false, start: GameStart::default(), used: Vec::new(), console: Vec::new(), console_out: Vec::new(), query_job: None, pending_game: None, held: false, mod_log: None, loaded_radius: fnv_game::game::DEFAULT_LOADED_RADIUS }
     }
 
     /// The player answered the open menu: it closes after this frame's scripts.

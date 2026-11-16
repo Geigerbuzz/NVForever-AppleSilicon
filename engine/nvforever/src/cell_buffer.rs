@@ -9,7 +9,12 @@
 //!   actors at Mid-High [documented: GECK wiki (JIP) GetActorsByProcessingLevel].
 //! - The buffers' sizes are INI settings: `uExterior Cell Buffer=36`, `uInterior Cell
 //!   Buffer=3` with `uGridsToLoad=5` [observed: the owner's install, Fallout_default.ini
-//!   and Fallout.ini].
+//!   and Fallout.ini]. The exterior buffer follows the loaded area here
+//!   ([`exterior_cells`]): the community rule is `(uGridsToLoad + 1)²`, 36 at the
+//!   original's 5 × 5 and 64 at 7 × 7 [documented: TweakGuides' rule, quoted in the
+//!   Nexus/AFK threads]. With a buffer smaller than the loaded square, `keep_newest`
+//!   evicts *loaded* cells arbitrarily and their actors drop from Mid-High to Low while
+//!   in view.
 //! - What a buffer holds [hypothesis]: the cells drawn most recently, the drawn ones
 //!   included (36 = the 5 × 5 loaded cells and the 11 left last; the interior buffer is
 //!   the interior the player is in and the two before). An interior does not touch the
@@ -35,14 +40,29 @@ use crate::world::{Streamer, WorldData};
 use fnv_sim::{FormId, RefTable};
 use std::collections::HashSet;
 
-/// Exterior cells kept [observed: `uExterior Cell Buffer`, Fallout_default.ini].
+/// Exterior cells kept at the original's loaded area [observed: `uExterior Cell Buffer`,
+/// Fallout_default.ini].
 pub const EXTERIOR_CELLS: usize = 36;
 /// Interior cells kept [observed: `uInterior Cell Buffer`, Fallout_default.ini].
 pub const INTERIOR_CELLS: usize = 3;
 
+/// Exterior cells the buffer keeps with `radius` cells loaded each way
+/// (`nvforever --radius`): `(uGridsToLoad + 1)²` with `uGridsToLoad = 2r + 1`, i.e.
+/// `(2r + 2)²` — 36 at the original's 5 × 5, 64 at 7 × 7 [documented: the community's
+/// `(uGrids + 1)²` rule, quoted in the Nexus/AFK threads; observed: 36 at uGrids=5].
+/// Never below [`EXTERIOR_CELLS`]: a loaded square smaller than the original's keeps the
+/// buffer the original had. The buffer is always larger than the loaded square
+/// (`(2r + 2)² > (2r + 1)²`), so `keep_newest` cannot evict a cell that is drawn.
+pub fn exterior_cells(radius: i32) -> usize {
+    let side = 2usize.saturating_mul(radius.max(0) as usize).saturating_add(2);
+    side.saturating_mul(side).max(EXTERIOR_CELLS)
+}
+
 /// The cells drawn most recently (module notes).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CellBuffer {
+    /// Exterior cells kept ([`exterior_cells`]).
+    exterior_cells: usize,
     /// Exterior cells (worldspace, grid square) and interior cells, with the frame each
     /// was last drawn in.
     exterior: HashMap<(u32, (i32, i32)), u64>,
@@ -57,7 +77,28 @@ pub struct CellBuffer {
     carried: std::sync::Mutex<Vec<Key>>,
 }
 
+impl Default for CellBuffer {
+    /// The original's buffer, for the original's loaded area.
+    fn default() -> Self {
+        CellBuffer::new(fnv_game::game::DEFAULT_LOADED_RADIUS)
+    }
+}
+
 impl CellBuffer {
+    /// A buffer for `radius` cells loaded each way: [`exterior_cells`] exterior cells and
+    /// the original's three interiors.
+    pub fn new(radius: i32) -> CellBuffer {
+        CellBuffer {
+            exterior_cells: exterior_cells(radius),
+            exterior: HashMap::new(),
+            interior: HashMap::new(),
+            frame: 0,
+            behind_doors: HashSet::new(),
+            doors_seen: HashSet::new(),
+            carried: Default::default(),
+        }
+    }
+
     /// The cells kept: exterior grid squares by worldspace, and interiors.
     pub fn cells(&self) -> (impl Iterator<Item = (u32, (i32, i32))> + '_, impl Iterator<Item = u32> + '_) {
         (self.exterior.keys().copied(), self.interior.keys().copied())
@@ -84,7 +125,7 @@ impl CellBuffer {
                 }
             }
         }
-        keep_newest(&mut self.exterior, EXTERIOR_CELLS);
+        keep_newest(&mut self.exterior, self.exterior_cells);
         keep_newest(&mut self.interior, INTERIOR_CELLS);
     }
 
@@ -253,5 +294,33 @@ mod tests {
         assert!(b.holds(Space::World(7), feet((2, 2))), "the exterior stays buffered");
         assert!(!b.holds(Space::Interior(101), [0.0; 3]));
         assert!((102..=104).all(|i| b.holds(Space::Interior(i), [0.0; 3])));
+    }
+
+    /// The buffer's size follows the loaded area: `(uGridsToLoad + 1)²`, 36 at the
+    /// original's 5 × 5 and 64 at `--radius 3`'s 7 × 7 [documented: `(uGrids + 1)²`],
+    /// and never below the original's. A loaded square larger than the buffer would let
+    /// `keep_newest` evict cells that are drawn (T2).
+    #[test]
+    fn the_buffer_is_never_smaller_than_the_loaded_square() {
+        assert_eq!(exterior_cells(2), EXTERIOR_CELLS, "the default stays the owner's 36");
+        assert_eq!(exterior_cells(3), 64, "7 × 7 plus a ring");
+        for r in 0..=8 {
+            let square = (2 * r + 1) * (2 * r + 1);
+            assert!(exterior_cells(r) > square, "radius {r}: {} cells for a {square}-cell square", exterior_cells(r));
+        }
+        assert_eq!(exterior_cells(-1), EXTERIOR_CELLS, "a nonsense radius keeps the original's");
+    }
+
+    #[test]
+    fn a_seven_by_seven_grid_is_not_evicted_by_the_cells_left_behind() {
+        let grid7 = |x0: i32, y0: i32| (-3..=3).flat_map(move |dx| (-3..=3).map(move |dy| (x0 + dx, y0 + dy)));
+        let mut b = CellBuffer::new(3);
+        b.remember(7, None, grid7(0, 0));
+        // One step north: the 49 drawn cells and the row left are 56, inside 64.
+        b.remember(7, None, grid7(0, 1));
+        for c in grid7(0, 0) {
+            assert!(b.holds(Space::World(7), feet(c)), "{c:?} was evicted while drawn (or left)");
+        }
+        assert_eq!(b.len().0, 56);
     }
 }

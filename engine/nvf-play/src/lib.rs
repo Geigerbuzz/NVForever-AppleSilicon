@@ -208,6 +208,19 @@ pub const HELP: &str =
 #[derive(Resource, Clone, Copy, Deref)]
 pub struct PlayWorld(pub PlayData);
 
+/// The engine's loaded-area radius in grid cells (`nvforever --radius`): the one number
+/// drawing, scripts and AI share (`GameConfig::loaded_radius`). The engine inserts it
+/// before [`PlayPlugin`]; without one the original's 5 × 5 applies
+/// ([`fnv_game::game::DEFAULT_LOADED_RADIUS`]).
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadedRadius(pub i32);
+
+impl Default for LoadedRadius {
+    fn default() -> Self {
+        LoadedRadius(fnv_game::game::DEFAULT_LOADED_RADIUS)
+    }
+}
+
 /// Whether the player is in the world, in a menu (no movement or looking in menus), in
 /// a conversation or behind a loading screen.
 #[derive(States, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -385,6 +398,9 @@ impl Plugin for PlayPlugin {
             .insert_resource(Location { world: d.world, interior: d.interior })
             .insert_resource(sim::SimState::new(d.lo, d.schema, d.index))
             .init_state::<PlayState>()
+            // The engine may have set the streaming radius already (`nvforever --radius`);
+            // the original's 5 × 5 otherwise.
+            .init_resource::<LoadedRadius>()
             .add_message::<Travel>()
             .add_message::<OpenContainer>()
             .add_message::<RefChanged>()

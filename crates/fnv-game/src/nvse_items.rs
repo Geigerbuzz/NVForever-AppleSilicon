@@ -264,12 +264,19 @@ pub(crate) fn call(g: &mut Game, ctx: &RunCtx, name: &str, subject: Option<FormI
             let entries = items.into_iter().enumerate().map(|(i, v)| (XKey::Num(i as f64), v)).collect();
             XVal::Array(g.ext.new_array(ArrayKind::List, entries))
         }
-        // [documented: GetGridsToLoad] uGridsToLoad: 5 [hypothesis: the game's default,
-        // NVForever has no such setting].
-        "getgridstoload" => XVal::Num(5.0),
+        // [documented: GetGridsToLoad] "the effective value of the uGridsToLoad ini
+        // setting", i.e. the loaded grid's side, 2r + 1: 5 at the default and 7 with
+        // `--radius 3` (the streamer's radius is the setting here, `Game::grids_to_load`).
+        // It is the setting, not the cells drawn this frame: a cell spawning or fading is
+        // no part of `uGridsToLoad`.
+        "getgridstoload" => XVal::Num(f64::from(g.grids_to_load())),
         // [documented: GetInGrid; GetInGridInCell] the target within `depth` grid squares
-        // of the centre cell (the player's) [hypothesis: depth defaults to the loaded
-        // grid's half, 2].
+        // of the centre cell (the player's); the wiki's depth defaults to 0 and -1 uses
+        // uGridsToLoad. Kept at 2 — the original 5 × 5's half — whatever the streamer's
+        // radius, even at `--radius 3` [parity shim: this engine has read depth 2 by
+        // default since Layer 5 and the parity goldens and the shipped scripts were
+        // recorded with it; the wiki's 0 and -1 are a separate fix, which must not ride
+        // on the radius].
         "getingrid" | "getingridincell" => {
             let k = usize::from(name == "getingridincell");
             let center = if k == 1 { form(args, 0) } else { g.cell_of(FormId::PLAYER_REF) };

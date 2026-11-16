@@ -139,6 +139,22 @@ fn stack_here() -> usize {
     std::hint::black_box(&marker) as *const u8 as usize
 }
 
+/// The loaded area's half-extent in grid cells when the engine says nothing: 2, the
+/// original's `uGridsToLoad=5` [documented: Fallout.ini; observed: the owner's install].
+/// The streamer's `--radius` is the same number (`Streamer::radius`), so drawing, scripts
+/// and AI load one square.
+pub const DEFAULT_LOADED_RADIUS: i32 = 2;
+
+/// The most cells the loaded area reaches each way: 8, a 17 × 17 square. The costs grow
+/// with the square (memory, spawn time, the AI's high set), and `Game::scan_cells` clamps
+/// a depth to 8, so a larger radius would leave the reference walks unable to reach the
+/// whole loaded area. The engine clamps `--radius` to this (`nvforever::MAX_RADIUS`).
+pub const MAX_LOADED_RADIUS: i32 = 8;
+
+fn loaded_radius_default() -> i32 {
+    DEFAULT_LOADED_RADIUS
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GameConfig {
     /// Fixed frame step in seconds (deterministic traces).
@@ -179,6 +195,13 @@ pub struct GameConfig {
     /// [decision: test runs only; boxes with a choice still wait for the player].
     #[serde(default)]
     pub answer_ok_boxes: bool,
+    /// The loaded area's half-extent in grid cells, the engine's streaming radius: the
+    /// cells [`Game::cells_around`] loads and the side [`Game::grids_to_load`] answers,
+    /// `2r + 1` across. The streamer's `--radius` is this same number, so what is drawn,
+    /// what scripts see and what the AI processes are one square [design; documented:
+    /// uGridsToLoad, the original's 5]. [`DEFAULT_LOADED_RADIUS`] is the original's.
+    #[serde(default = "loaded_radius_default")]
+    pub loaded_radius: i32,
 }
 
 fn yes() -> bool {
@@ -187,7 +210,18 @@ fn yes() -> bool {
 
 impl Default for GameConfig {
     fn default() -> Self {
-        GameConfig { frame_seconds: 1.0 / 60.0, strict: false, trace_locals: false, seed: 0, max_steps: 100_000, modal_message_boxes: true, package_interval: None, goodbye_at_once: false, answer_ok_boxes: false }
+        GameConfig {
+            frame_seconds: 1.0 / 60.0,
+            strict: false,
+            trace_locals: false,
+            seed: 0,
+            max_steps: 100_000,
+            modal_message_boxes: true,
+            package_interval: None,
+            goodbye_at_once: false,
+            answer_ok_boxes: false,
+            loaded_radius: DEFAULT_LOADED_RADIUS,
+        }
     }
 }
 
@@ -5207,21 +5241,40 @@ impl<'a> Game<'a> {
     }
 
     /// The cells loaded around `cell`: the cell itself for an interior; for an exterior,
-    /// the 5×5 cells around it [hypothesis: the uGridsToLoad default of 5].
+    /// the `2r + 1` square around it, `r` being [`Game::loaded_radius`] (the streamer's
+    /// `--radius`): 5×5 by default, as the original's `uGridsToLoad=5` [documented;
+    /// hypothesis: the square drawn is the same one, `Streamer::radius`].
     pub fn cells_around(&self, cell: FormId) -> BTreeSet<FormId> {
         let mut out = BTreeSet::from([cell]);
         let placed = self.world.placed;
         let Some(world) = placed.world_of(cell) else { return out };
         let Some(grid) = placed.world_grid.get(&world) else { return out };
         let Some((&(x, y), _)) = grid.iter().find(|(_, &c)| c == cell) else { return out };
-        for dx in -2..=2 {
-            for dy in -2..=2 {
+        let r = self.loaded_radius();
+        for dx in -r..=r {
+            for dy in -r..=r {
                 if let Some(&c) = grid.get(&(x + dx, y + dy)) {
                     out.insert(c);
                 }
             }
         }
         out
+    }
+
+    /// The loaded area's half-extent in grid cells: the engine's streaming radius
+    /// (`nvforever --radius`, [`GameConfig::loaded_radius`]), between 0 and
+    /// [`MAX_LOADED_RADIUS`]. 2 is the original's 5×5.
+    pub fn loaded_radius(&self) -> i32 {
+        self.cfg.loaded_radius.clamp(0, MAX_LOADED_RADIUS)
+    }
+
+    /// The cells across the loaded grid, the original's `uGridsToLoad`: `2r + 1`, 5 at
+    /// [`DEFAULT_LOADED_RADIUS`]. This is what `GetGridsToLoad` answers: the *setting*,
+    /// as the original reads its INI ("the effective value of the uGridsToLoad ini
+    /// setting" [documented]), never the cells drawn at this moment (a cell still
+    /// spawning, fading out, or held by the unload hysteresis is not the setting).
+    pub fn grids_to_load(&self) -> i32 {
+        2 * self.loaded_radius() + 1
     }
 
     /// Make `cells` the loaded set; scripted references now in newly loaded cells get

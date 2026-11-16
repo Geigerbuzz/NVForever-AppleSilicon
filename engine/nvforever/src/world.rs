@@ -158,7 +158,10 @@ pub struct TreeBillboard;
 
 #[derive(Resource)]
 pub struct Streamer {
-    /// Cells within this many grid steps of the camera's cell are loaded.
+    /// Cells within this many grid steps of the camera's cell are loaded. This is the
+    /// one loaded-area number: the scripts' `Game::cells_around` loads the same square
+    /// (`nvf_play::LoadedRadius` → `GameConfig::loaded_radius`) and the AI's high process
+    /// follows [`Streamer::loaded`] [documented: uGridsToLoad].
     pub radius: i32,
     /// Cells drawn, including exterior cells still fading out.
     pub loaded: HashMap<(i32, i32), Entity>,
