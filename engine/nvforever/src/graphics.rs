@@ -717,18 +717,20 @@ fn sun_shadow_quality(
 /// component follow FSR alone, and DLSS's component DLSS alone
 /// (`upscaler::effective_temporal`).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-fn apply(
+pub(crate) fn apply(
     mut commands: Commands,
     g: Res<Graphics>,
     msaa: Res<MsaaSetting>,
     fsr_support: Res<crate::fsr::FsrSupport>,
     status: Option<Res<UpscalerStatus>>,
+    dynamic: Option<Res<crate::dyn_res::DynamicRes>>,
     mut sky: ResMut<SkyState>,
     cams: Query<(Entity, &Msaa, Option<&FsrUpscaling>, Option<&DlssUpscaling>, Has<crate::taa::TemporalAa>, Has<Fxaa>, Has<Smaa>), With<FlyCam>>,
     suns: Query<(Entity, &DirectionalLight), With<Sun>>,
     eye: Res<crate::eye_adapt::EyeCurve>,
     cutouts: Option<ResMut<nvf_assets::nif_material::BlendedCutouts>>,
     mut done: Local<Option<(Graphics, Msaa, bool, UpscalerChoice, Vec<Entity>)>>,
+    mut dynamic_before: Local<Option<(bool, bool)>>,
 ) {
     let cam_count = cams.iter().count();
     if cam_count == 0 {
@@ -737,21 +739,38 @@ fn apply(
     let upscaler = crate::upscaler::effective_temporal(g.fsr(), fsr_support.0, status.as_deref());
     let (fsr, dlss) = (upscaler.fsr(), upscaler.dlss());
     let temporal = upscaler != UpscalerChoice::Off;
+    // The dynamic scaler's camera draws as an upscaler's would (single-sampled, HDR, the
+    // jitter and mip bias components `upscaler::prep` requires) while the feature is on, even
+    // at native: the render size is the governor's to change, but the view's *kind* must not
+    // change with it (multisampling back on at 1.0 would re-specialise every material pipeline
+    // and swap the main textures each time the ladder crossed native). No temporal upscaler
+    // draws it: FSR and DLSS are taken first (`upscaler::prep::extract`).
+    // The second flag is whether the ladder is below native: only then does a prepared view
+    // write the mip bias again (`upscaler::prep::prepare`), so the crossing back to native has
+    // to re-apply the camera or it keeps the last scale's bias.
+    let (dynamic, dynamic_scaled) = match dynamic.as_ref() {
+        Some(dynamic) if !temporal => (dynamic.requested(), dynamic.active()),
+        _ => (false, false),
+    };
     // Blended shapes that draw the same as cut-outs (the corn rows) are cut-outs for a
     // temporal upscaler, which needs their depth and motion (nif_material::BlendedCutouts).
     if let Some(mut cutouts) = cutouts {
         cutouts.set_if_neq(nvf_assets::nif_material::BlendedCutouts(temporal));
     }
-    let want_msaa = if g.screen_aa == ScreenAa::Off && !temporal { msaa.0 } else { Msaa::Off };
+    let want_msaa = if g.screen_aa == ScreenAa::Off && !temporal && !dynamic { msaa.0 } else { Msaa::Off };
     let aa_matches = cams.iter().all(|(_, actual_msaa, actual_fsr, actual_dlss, taa, fxaa, smaa)| {
         *actual_msaa == want_msaa && actual_fsr.map(|f| f.quality) == fsr && actual_dlss.map(|d| d.quality) == dlss
-            && taa == (g.screen_aa == ScreenAa::Taa && !temporal)
+            && taa == (g.screen_aa == ScreenAa::Taa && !temporal && !dynamic)
             && fxaa == (g.screen_aa == ScreenAa::Fxaa && !temporal)
             && smaa == (g.screen_aa == ScreenAa::Smaa && !temporal)
     });
+    // The scaler is not a `Graphics` row: a change of its own re-applies the camera too
+    // (turned on, back to native, or the ladder crossing native either way), and nothing else
+    // does.
+    let dynamic_moved = dynamic_before.is_none_or(|before| before != (dynamic, dynamic_scaled));
     let mut entities: Vec<Entity> = cams.iter().map(|c| c.0).chain(suns.iter().map(|s| s.0)).collect();
     entities.sort_unstable();
-    if aa_matches && done.as_ref().is_some_and(|(d, m, supported, effective, previous)| *d == *g && *m == msaa.0 && *supported == fsr_support.0 && *effective == upscaler && *previous == entities) {
+    if !dynamic_moved && aa_matches && done.as_ref().is_some_and(|(d, m, supported, effective, previous)| *d == *g && *m == msaa.0 && *supported == fsr_support.0 && *effective == upscaler && *previous == entities) {
         return;
     }
     let first = done.is_none();
@@ -762,6 +781,7 @@ fn apply(
     let fsr_changed = done.as_ref().is_none_or(|(_, _, _, effective, _)| effective.fsr() != fsr);
     let dlss_changed = done.as_ref().is_none_or(|(_, _, _, effective, _)| effective.dlss() != dlss);
     *done = Some((*g, msaa.0, fsr_support.0, upscaler, entities));
+    *dynamic_before = Some((dynamic, dynamic_scaled));
     for (cam, cam_msaa, ..) in &cams {
         let mut e = commands.entity(cam);
         if g.ambient_occlusion {
@@ -785,7 +805,7 @@ fn apply(
         } else {
             e.remove::<(bevy::post_process::bloom::Bloom, bevy::camera::Hdr, crate::post::ImageSpaceGlow)>();
         }
-        if temporal {
+        if temporal || dynamic {
             e.insert(bevy::camera::Hdr);
         }
         // Eye adaptation (eye_adapt.rs) and the bright pass need the HDR view; each has
@@ -804,10 +824,19 @@ fn apply(
         if *cam_msaa != want_msaa {
             e.insert(want_msaa);
         }
-        if g.screen_aa == ScreenAa::Taa && !temporal {
+        if g.screen_aa == ScreenAa::Taa && !temporal && !dynamic {
             e.insert(crate::taa::components());
-        } else {
+        } else if !dynamic {
             e.remove::<(crate::taa::TemporalAa, TemporalJitter, MipBias)>();
+        }
+        // The dynamic scaler's camera takes the components every prepared view requires
+        // (`upscaler::prep::prepare`): the jitter (which it keeps at zero: it accumulates
+        // nothing) and the mip bias, which `prep::prepare` then writes from the policy's
+        // log2(render / output) each prepared frame. Zero here, not FSR's -1: at native the
+        // ladder's last step leaves no prepared view to write it, and a -1 would blur every
+        // texture of a picture drawn at the window's own size.
+        if dynamic {
+            e.insert((TemporalJitter::default(), MipBias(0.0)));
         }
         if let Some(quality) = fsr {
             e.insert((

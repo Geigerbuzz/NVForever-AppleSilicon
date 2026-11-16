@@ -968,7 +968,7 @@ fn register_graphics(app: &mut App) {
         },
     );
     nvf_play::settings::set_disabled_status(app, "latency-reduction", |w| (!crate::anti_lag::available(w)).then_some("Not on this GPU"));
-    let switches: [Switch; 13] = [
+    let switches: [Switch; 14] = [
         (
             "ambient-occlusion",
             "Ambient occlusion",
@@ -1076,10 +1076,25 @@ fn register_graphics(app: &mut App) {
             |w| w.resource::<Graphics>().water_mirror,
             |w, on| w.resource_mut::<Graphics>().water_mirror = on,
         ),
+        (
+            "dynamic-resolution",
+            "Dynamic resolution",
+            "On: the world is drawn smaller than the window and scaled back up, by as much as holding the frame time takes. Needs HDR. Neither the interface nor the picture after it changes size.",
+            "--dyn-res, --dyn-res-hold",
+            |w| w.get_resource::<crate::dyn_res::DynamicRes>().is_some_and(|d| d.enabled),
+            |w, on| {
+                if let Some(mut dynamic) = w.get_resource_mut::<crate::dyn_res::DynamicRes>() {
+                    dynamic.enabled = on;
+                }
+            },
+        ),
     ];
     for (key, label, note, switches, get, set) in switches {
         add_setting(app, Setting { key, group: GROUP_GRAPHICS, label, note, switches, get, set, slider: None });
     }
+    nvf_play::settings::set_disabled_status(app, "dynamic-resolution", |w| {
+        crate::upscaler::temporal_active(w).then_some("Off (upscaling active)")
+    });
 }
 
 fn register_pipeline_waits(app: &mut App) {

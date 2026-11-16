@@ -80,6 +80,7 @@ mod dlss_download;
 #[cfg_attr(target_vendor = "apple", path = "nv_low_latency_apple.rs")]
 mod nv_low_latency;
 mod frame_pace;
+mod dyn_res;
 mod frame_telemetry;
 mod blit_warm;
 mod handoff;
@@ -514,6 +515,17 @@ struct Args {
     /// take precedence in normal play, as for other switches. Default: default.
     #[arg(long, value_enum)]
     dlss_model: Option<upscaler::DlssModel>,
+    /// Dynamic resolution: draw the world smaller than the window and scale the picture back
+    /// up, by as much as holding this frame time (milliseconds, 8.33 without a value) takes.
+    /// The interface stays at the window's size. Off when not given; never in a run that
+    /// saves a picture. Saved Graphics settings take precedence in normal play, as for other
+    /// switches.
+    #[arg(long, num_args = 0..=1, default_missing_value = "8.33", require_equals = true, value_name = "MS")]
+    dyn_res: Option<f32>,
+    /// With --dyn-res: hold this scale (0.5 to 1.0) instead of letting the frame time choose
+    /// one, for measuring a scale on its own.
+    #[arg(long, requires = "dyn_res", allow_hyphen_values = true, value_name = "SCALE")]
+    dyn_res_hold: Option<f32>,
     /// Instead of --graphics: exactly these improvements on, by the settings page's keys
     /// (ambient-occlusion, fine-shadows, bloom, sharpen, anisotropic, light-shafts,
     /// water-reflections, terrain-height-blend, terrain-anti-tiling) and choices (fxaa, smaa or taa instead of --msaa;
@@ -1519,6 +1531,7 @@ fn main() -> AppExit {
     .add_plugins(nvf_play::audio_out::AudioOutPlugin)
     .add_plugins((ArchivePlugin(game), lights::LightsPlugin, fog::FogPlugin, eye_adapt::EyeAdaptPlugin, emittance::EmittancePlugin, water::WaterPlugin, tree::TreePlugin, terrain::TerrainPlugin, reflection::ReflectionPlugin, ripples::RipplesPlugin))
     .add_plugins((imagespace::ImageSpacePlugin, sky::SkyPlugin, graphics::GraphicsPlugin(graphics, msaa, frame_times)))
+    .add_plugins(dyn_res::DynResPlugin(dyn_res::DynamicRes::from_args(&args)))
     // The switches the settings page weighs against the INI (`--play` only), for the
     // frame split's start-time decision (perf_overlay/split.rs).
     .add_plugins(perf_overlay::PerfOverlayPlugin(args.fps, play.is_some().then(|| settings::given_switches(&args, &command_line()))))

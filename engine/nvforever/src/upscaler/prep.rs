@@ -68,6 +68,11 @@ pub(crate) enum UpscaleSettings {
     Fsr(FsrUpscaling),
     /// DLSS at a quality (`dlss::dlss_pass`).
     Dlss(UpscaleQuality),
+    /// The dynamic scaler (`dyn_res`) at a scale: the world drawn smaller and scaled back up
+    /// with no history. Not a temporal upscaler, and no camera component draws it: the
+    /// governor puts it on a camera that no upscaler draws (`extract`), and
+    /// `dyn_res::dyn_pass` scales the picture up. Its `choice` is `Off`.
+    Dynamic(f32),
 }
 
 impl Default for UpscaleSettings {
@@ -81,6 +86,7 @@ impl UpscaleSettings {
         match self {
             Self::Fsr(fsr) => UpscalerChoice::Fsr(fsr.quality),
             Self::Dlss(quality) => UpscalerChoice::Dlss(quality),
+            Self::Dynamic(_) => UpscalerChoice::Off,
         }
     }
 
@@ -169,6 +175,7 @@ pub(crate) fn policy(
     match settings {
         UpscaleSettings::Fsr(fsr) => crate::fsr::policy(fsr.quality, output, limits),
         UpscaleSettings::Dlss(quality) => crate::dlss::sizing::policy(quality, output, dlss_optimal(quality)),
+        UpscaleSettings::Dynamic(scale) => crate::dyn_res::policy(scale, output),
     }
 }
 
@@ -193,7 +200,10 @@ pub(crate) fn camera_settings(fsr: Option<&FsrUpscaling>, dlss: Option<&DlssUpsc
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn extract(
     mut commands: Commands,
-    cameras: Extract<Query<(RenderEntity, &Camera, &Projection, &GlobalTransform, Option<&FsrUpscaling>, Option<&DlssUpscaling>)>>,
+    cameras: Extract<Query<(
+        RenderEntity, &Camera, &Projection, &GlobalTransform, Option<&FsrUpscaling>, Option<&DlssUpscaling>,
+        Option<&crate::dyn_res::DynamicResolution>,
+    )>>,
     existing: Query<Entity, With<UpscaleCamera>>,
     frame: Extract<Res<FrameCount>>,
     time: Extract<Res<Time<Real>>>,
@@ -203,8 +213,12 @@ pub(crate) fn extract(
     pipboy_screen: Extract<Option<Res<nvf_play::pipboy::PipBoyScreen>>>,
 ) {
     let mut active = Vec::new();
-    for (entity, camera, projection, transform, fsr, dlss) in &cameras {
-        let (Some(settings), Projection::Perspective(projection)) = (camera_settings(fsr, dlss, support.0), projection) else { continue };
+    for (entity, camera, projection, transform, fsr, dlss, dynamic) in &cameras {
+        // A temporal upscaler first: it reconstructs from several frames, which the dynamic
+        // scaler does not, so one camera is never prepared for both.
+        let settings = camera_settings(fsr, dlss, support.0)
+            .or_else(|| dynamic.filter(|dynamic| dynamic.scale < 1.0).map(|dynamic| UpscaleSettings::Dynamic(dynamic.scale)));
+        let (Some(settings), Projection::Perspective(projection)) = (settings, projection) else { continue };
         if !camera.is_active || camera.physical_viewport_size().is_none_or(|s| s.x < 32 || s.y < 32) {
             continue;
         }
@@ -360,7 +374,11 @@ pub(crate) fn prepare(
             // Met every frame while it lasts: said once. The view renders natively, without
             // the upscaler's jitter and mip bias, as for an unsupported size below.
             if !warned {
-                warn!("{} requires a single-sampled HDR view with no viewport offset; rendering natively until it is one", camera.settings.upscaler().name());
+                let name = match camera.settings {
+                    UpscaleSettings::Dynamic(_) => "dynamic resolution",
+                    settings => settings.upscaler().name(),
+                };
+                warn!("{name} requires a single-sampled HDR view with no viewport offset; rendering natively until it is one");
                 commands.entity(entity).insert(UnsuitableViewWarned);
             }
             jitter.offset = Vec2::ZERO;
@@ -390,8 +408,14 @@ pub(crate) fn prepare(
         if matches!(camera.settings, UpscaleSettings::Dlss(_)) {
             usages.0 |= crate::dlss::main_texture_usages();
         }
-        // Bevy applies its projection jitter with the opposite displacement sign.
-        jitter.offset = -jitter_offset(camera.frame, policy.jitter_phases);
+        // Bevy applies its projection jitter with the opposite displacement sign. The
+        // dynamic scaler reconstructs nothing from several frames, so it takes no jitter:
+        // one phase is not none (wgpu-ffx still offsets by a fraction of a texel), and an
+        // offset nothing resolves only softens the picture.
+        jitter.offset = match camera.settings {
+            UpscaleSettings::Dynamic(_) => Vec2::ZERO,
+            _ => -jitter_offset(camera.frame, policy.jitter_phases),
+        };
         bias.0 = policy.mip_bias;
         // The ambient occlusion: at the render size before the upscaler (ssao.rs
         // `ao_before_fsr`), or with `NVF_AO_BEFORE_FSR=0` after tonemapping, from the depth

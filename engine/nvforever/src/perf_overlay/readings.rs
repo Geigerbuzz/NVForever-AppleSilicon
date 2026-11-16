@@ -409,6 +409,12 @@ fn choice_text(choice: UpscalerChoice) -> String {
 pub fn upscale_text(u: &Upscale) -> String {
     let off = || fnv_util::words::tr("Off").to_string();
     match (u.effective, u.drawn) {
+        // The dynamic scaler (`dyn_res`): no upscaler is effective, but the world is smaller
+        // than the window. Without this arm the row would read `Off  896x560 -> 1280x800`,
+        // which says the scaler is off while showing the sizes of it.
+        (_, Some(DrawnUpscale::Upscaled { choice: UpscalerChoice::Off, render, output })) => {
+            format!("{}  {} -> {}", fnv_util::words::tr("Dynamic resolution"), size(render), size(output))
+        }
         (e, Some(DrawnUpscale::Upscaled { choice, render, output })) if choice == e => {
             let mut text = format!("{}  {} -> {}", choice_text(choice), size(render), size(output));
             if choice.is_dlss() {
@@ -912,6 +918,11 @@ mod tests {
         // Nothing effective: Off and the window, whatever the render world drew last.
         assert_eq!(upscale_text(&reading(UpscalerChoice::Off, None)), "Off  1280x720");
         assert_eq!(upscale_text(&reading(UpscalerChoice::Off, upscaled(dlss, render))), "Off  1280x720", "switched off, not drawn yet");
+        assert_eq!(
+            upscale_text(&reading(UpscalerChoice::Off, upscaled(UpscalerChoice::Off, render))),
+            "Dynamic resolution  853x480 -> 1280x720",
+            "the dynamic scaler: no upscaler is effective, but the world is smaller than the window"
+        );
         assert_eq!(upscale_text(&Upscale { window: None, ..reading(UpscalerChoice::Off, None) }), "Off", "no window to measure");
         // A switch not drawn yet, no camera: the effective choice and no sizes.
         let performance = UpscalerChoice::Fsr(Performance);
