@@ -16,6 +16,9 @@ use serde_json::Value as Json;
 
 const Q_GATED: u32 = 0x900;
 const Q_PLAIN: u32 = 0x901;
+/// A quest whose gate condition sits in an OR group that a second actor passes by
+/// another branch of the quest's own conditions.
+const Q_GATED_OR: u32 = 0x902;
 const VOICE_UNIQUE: u32 = 0x910;
 const ROBOT: u32 = 0x920;
 const OTHER: u32 = 0x921;
@@ -25,24 +28,34 @@ const T_OWN: u32 = 0xA02;
 const L_GATED: u32 = 0xB00;
 const L_PLAIN: u32 = 0xB01;
 const L_OWN: u32 = 0xB02;
+const T_GATED_OR: u32 = 0xA03;
+const L_GATED_OR: u32 = 0xB03;
 const CELL: u32 = 0x200;
 const ROBOT_REF: u32 = 0x320;
 const OTHER_REF: u32 = 0x321;
 const GET_IS_ID: u16 = 72;
+const GET_STAGE: u16 = 59;
 
 fn u32b(v: u32) -> Vec<u8> {
     v.to_le_bytes().to_vec()
 }
 
+/// A CTDA: its type byte (the comparison in the top three bits, `FLAG_OR` in bit 0), the
+/// comparison value, the function and its two raw parameters.
+fn cond(ty: u8, function: u16, value: f32, param1: u32, param2: u32) -> Subrecord {
+    let mut d = vec![ty, 0, 0, 0];
+    d.extend(value.to_le_bytes());
+    d.extend(function.to_le_bytes());
+    d.extend([0, 0]);
+    d.extend(param1.to_le_bytes());
+    d.extend(param2.to_le_bytes());
+    d.extend([0u8; 8]);
+    sub(b"CTDA", d)
+}
+
 /// `GetIsID <actor> == 1` on the subject.
 fn is_id(actor: u32) -> Subrecord {
-    let mut d = vec![0u8, 0, 0, 0];
-    d.extend(1f32.to_le_bytes());
-    d.extend(GET_IS_ID.to_le_bytes());
-    d.extend([0, 0]);
-    d.extend(actor.to_le_bytes());
-    d.extend([0u8; 12]);
-    sub(b"CTDA", d)
+    cond(0, GET_IS_ID, 1.0, actor, 0)
 }
 
 /// A line without a fixed speaker, with the given conditions of its own.
@@ -66,6 +79,19 @@ fn plugin_bytes() -> Vec<u8> {
     let quests = [
         record(b"QUST", 0, Q_GATED, &[sub(b"EDID", z("RobotTalk")), quest_data(), is_id(ROBOT)]),
         record(b"QUST", 0, Q_PLAIN, &[sub(b"EDID", z("AnyTalk")), quest_data()]),
+        // `GetIsID ROBOT == 1` OR `GetStage Q_PLAIN == 0`: the stage branch passes for
+        // anyone, so the quest passes for OTHER although its gate names only ROBOT.
+        record(
+            b"QUST",
+            0,
+            Q_GATED_OR,
+            &[
+                sub(b"EDID", z("RobotOrStageTalk")),
+                quest_data(),
+                cond(fnv_game::cond::FLAG_OR, GET_IS_ID, 1.0, ROBOT, 0),
+                cond(0, GET_STAGE, 0.0, Q_PLAIN, 0),
+            ],
+        ),
     ]
     .concat();
     // DNAM 0: Allow Default Dialog is off.
@@ -76,6 +102,7 @@ fn plugin_bytes() -> Vec<u8> {
         topic(T_GATED, "RobotGreeting", &line(L_GATED, Q_GATED, vec![])),
         topic(T_PLAIN, "AnyGreeting", &line(L_PLAIN, Q_PLAIN, vec![])),
         topic(T_OWN, "OwnGreeting", &line(L_OWN, Q_PLAIN, vec![is_id(ROBOT)])),
+        topic(T_GATED_OR, "RobotOrStageGreeting", &line(L_GATED_OR, Q_GATED_OR, vec![])),
     ]
     .concat();
     let placed = |id: u32, edid: &str, base: u32| record(b"ACHR", 0, id, &[sub(b"EDID", z(edid)), sub(b"NAME", u32b(base)), sub(b"DATA", vec![0; 24])]);
@@ -135,4 +162,19 @@ fn a_quests_condition_on_the_speaker_opens_its_lines_to_a_voice_without_default_
     // The line's own condition, as before.
     assert_eq!(g.select_line(robot, player, FormId(T_OWN)), Some(FormId(L_OWN)));
     assert_eq!(g.select_line(other, player, FormId(T_OWN)), None);
+}
+
+/// #2378 counts a quest gate only when that condition *passed* for the speaker: a quest
+/// that passes through another branch of its OR does not let a voice type without Allow
+/// Default Dialog say its lines (docs/spec-notes/actor-flags.md section 9).
+#[test]
+fn a_quest_gate_that_fails_for_the_speaker_does_not_open_its_lines() {
+    let f = fixture();
+    let mut g = game(&f);
+    let (robot, other, player) = (FormId(ROBOT_REF), FormId(OTHER_REF), Some(FormId::PLAYER_REF));
+    // The robot's branch of the quest passes: its gate is a condition that passed.
+    assert_eq!(g.select_line(robot, player, FormId(T_GATED_OR)), Some(FormId(L_GATED_OR)));
+    // The other actor of the same voice type passes the quest by its stage branch, but the
+    // gate that names who may say these lines did not pass for it.
+    assert_eq!(g.select_line(other, player, FormId(T_GATED_OR)), None);
 }

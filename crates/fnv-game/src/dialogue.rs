@@ -385,6 +385,11 @@ impl<'a> Game<'a> {
         if let Some(s) = def.speaker.filter(|_| says == Says::Actor && self.fixed_speaker_refuses(def, speaker)) {
             return Err(Blocked::Speaker(s));
         }
+        // Whether a condition of the quest's that names who may say its lines (a voice
+        // gate) is one that *passed* for this speaker. A quest that passes through another
+        // branch of its OR does not open its lines to a voice type no condition names:
+        // the gate conditions have to pass too (docs/spec-notes/actor-flags.md section 9).
+        let mut quest_gate_passed = false;
         if let Some(q) = def.quest {
             if !self.quests.get(&q).is_some_and(|s| s.running) {
                 return Err(Blocked::QuestNotRunning(q));
@@ -394,6 +399,7 @@ impl<'a> Game<'a> {
                 if !crate::cond::combine_results(&r) {
                     return Err(Blocked::QuestConditions(q, r));
                 }
+                quest_gate_passed = c.iter().zip(&r).any(|(cond, res)| res.passed && VOICE_GATE_FUNCTIONS.contains(&cond.function));
             }
         }
         // A voice type without Allow Default Dialog says only lines conditioned on it; not
@@ -405,8 +411,7 @@ impl<'a> Game<'a> {
         // its ED-E says them] (#2378, docs/spec-notes/actor-flags.md §9).
         if says != Says::Station && speaker != FormId::PLAYER_REF && def.speaker.is_none() && self.voice_without_default(speaker) {
             let gate = |c: &crate::cond::Condition| VOICE_GATE_FUNCTIONS.contains(&c.function);
-            let quest_gates = def.quest.and_then(|q| data.quests.get(&q)).is_some_and(|q| q.conditions.iter().any(gate));
-            if !quest_gates && !def.conditions.iter().any(gate) {
+            if !quest_gate_passed && !def.conditions.iter().any(gate) {
                 return Err(Blocked::VoiceType);
             }
         }

@@ -1246,6 +1246,22 @@ pub fn settling(firing: f32) -> f32 {
     SETTLE_DEGREES * (1.0 - firing / SETTLE_SECONDS).clamp(0.0, 1.0)
 }
 
+/// An NPC's shot cone in degrees: its actor spread's cone plus [`settling`], no wider
+/// than `fNPCMaxGunWobbleAngle` (docs/design/combat.md section 5.1, "For NPCs the total is
+/// scaled up by `fNPCMaxGunWobbleAngle`"). The setting was read from the load order and
+/// never used, so a load order or an INI that lowers it was ignored. At FalloutNV.esm's
+/// 15 degrees it leaves an ordinary NPC shot as it was; only a shot already wider than 15
+/// degrees (a very loose weapon at low skill) is held there, which is what a maximum means.
+pub(crate) fn npc_cone(r: &fnv_combat::tuning::Rules, actor_spread: f32, ws: &WeaponStats, settling: f32) -> f32 {
+    let cone = spread::cone_deg(actor_spread, 0.0, ws, &[]) + settling;
+    let cap = r.npc_max_gun_wobble_angle;
+    if cap > 0.0 {
+        cone.min(cap)
+    } else {
+        cone
+    }
+}
+
 fn reach_of(c: &Combat, arm: &Arm, scale: f32) -> f32 {
     match arm {
         Arm::Gun(_) => 0.0,
@@ -2825,7 +2841,7 @@ pub(crate) fn fight(
                                 let st = shot_stance(fighter.sights, crouched, gait, skill, strength, [left_arm_crippled, right_arm_crippled, head_crippled]);
                                 let actor_spread = shot_spread(&c.rules, &c.tuning, ws, &st, g.gun_wobble_off(me));
                                 g.other.jg9.spreads.insert(me, actor_spread);
-                                let cone = spread::cone_deg(actor_spread, 0.0, ws, &[]) + settling(fighter.firing_for);
+                                let cone = npc_cone(&c.rules, actor_spread, ws, settling(fighter.firing_for));
                                 fire.write(ActorFire { shooter: me, weapon: *w, origin, aim, cone, muzzle, harmless: false });
                                 anims.write(PlayAttack { actor: id, weapon: Some(*w), melee: false, sights: fighter.sights, kind: Move::Attack, power: None, swing: None });
                                 f.stats.shots += 1;
@@ -3885,6 +3901,27 @@ mod tests {
         assert_eq!(settling(0.0), SETTLE_DEGREES);
         assert!((settling(SETTLE_SECONDS / 2.0) - SETTLE_DEGREES / 2.0).abs() < 1e-5);
         assert_eq!(settling(10.0), 0.0);
+    }
+
+    #[test]
+    fn an_npcs_shot_wobble_is_capped_by_its_setting() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // A very loose weapon: the cone is wider than the shipped 15 degrees.
+        let loose = WeaponStats { min_spread: 10.0, ..Default::default() };
+        let mut r = fnv_combat::tuning::Rules::defaults();
+        // A lowered setting caps it...
+        r.npc_max_gun_wobble_angle = 2.0;
+        assert!(near(npc_cone(&r, 10.0, &loose, 0.0), 2.0));
+        // ...and the settling after an NPC's first shots.
+        assert!(near(npc_cone(&r, 0.0, &WeaponStats::default(), SETTLE_DEGREES), 2.0));
+        // An ordinary shot at the shipped 15 degrees is left as it was...
+        r.npc_max_gun_wobble_angle = 15.0;
+        let ordinary = spread::cone_deg(0.3, 0.0, &WeaponStats { min_spread: 1.0, ..Default::default() }, &[]);
+        assert!(ordinary < 15.0);
+        assert!(near(npc_cone(&r, 0.3, &WeaponStats { min_spread: 1.0, ..Default::default() }, 0.0), ordinary));
+        // ...and a setting nobody supplies caps nothing.
+        r.npc_max_gun_wobble_angle = 0.0;
+        assert!(near(npc_cone(&r, 0.0, &WeaponStats::default(), SETTLE_DEGREES), SETTLE_DEGREES));
     }
 
     /// The actor spread of an NPC shot moving so (#2125), the weapon, skill, Strength,
