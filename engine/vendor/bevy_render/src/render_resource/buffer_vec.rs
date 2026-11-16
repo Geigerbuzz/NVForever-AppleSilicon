@@ -14,6 +14,20 @@ use wgpu::{BindingResource, BufferAddress, BufferUsages};
 
 use super::GpuArrayBufferable;
 
+/// How many items to allocate for a buffer that needs `capacity` items: a
+/// quarter more, plus a few.
+///
+/// NVForever stable buffer identities. A `wgpu` buffer's identity is part of the
+/// key of every bind group that names it, so a buffer that is reallocated makes
+/// `prepare_preprocess_bind_groups` rebuild those bind groups. `reserve` used to
+/// allocate exactly the requested count, so a scene whose mesh, bin, or work
+/// item count kept reaching new maxima reallocated (and forced a rebuild) again
+/// and again. Allocating with headroom makes new maxima rare, and the cost is
+/// only VRAM: these buffers hold tens of bytes to a few hundred bytes an item.
+fn buffer_capacity_with_headroom(capacity: usize) -> usize {
+    capacity + capacity / 4 + 16
+}
+
 /// A structure for storing raw bytes that have already been properly formatted
 /// for use by the GPU.
 ///
@@ -183,10 +197,15 @@ impl<T: NoUninit> RawBufferVec<T> {
     pub fn reserve(&mut self, capacity: usize, device: &RenderDevice) {
         let size = self.item_size * capacity;
         if capacity > self.capacity || (self.changed && size > 0) {
-            self.capacity = capacity;
+            // NVForever stable buffer identities: allocate with headroom instead
+            // of exactly `capacity`. A buffer's identity (its `BufferId`) is part
+            // of the key of every bind group that names it, so reallocating one
+            // means rebuilding all of those bind groups; a count that grows a
+            // little at a time would otherwise reallocate on every new maximum.
+            self.capacity = buffer_capacity_with_headroom(capacity);
             self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: make_buffer_label::<Self>(&self.label),
-                size: size as BufferAddress,
+                size: (self.item_size * self.capacity) as BufferAddress,
                 usage: BufferUsages::COPY_DST | self.buffer_usage,
                 mapped_at_creation: false,
             }));
@@ -821,8 +840,9 @@ where
             return;
         }
 
-        self.capacity = capacity;
-        let size = self.item_size * capacity;
+        // NVForever stable buffer identities: see `RawBufferVec::reserve`.
+        self.capacity = buffer_capacity_with_headroom(capacity.max(self.capacity));
+        let size = self.item_size * self.capacity;
         self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: make_buffer_label::<Self>(&self.label),
             size: size as BufferAddress,
@@ -911,8 +931,9 @@ where
             return;
         }
 
-        let size = size_of::<T>() * capacity;
-        self.capacity = capacity;
+        // NVForever stable buffer identities: see `RawBufferVec::reserve`.
+        self.capacity = buffer_capacity_with_headroom(capacity);
+        let size = size_of::<T>() * self.capacity;
         self.buffer = Some(render_device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&self.label),
             size: size as u64,

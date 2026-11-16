@@ -377,6 +377,74 @@ pub enum PhasePreprocessBindGroups {
     },
 }
 
+/// The identity of one slice that a bind group binds: which buffer, and which
+/// bytes of it.
+///
+/// A `wgpu::BindGroup` names buffers and ranges; it does not snapshot their
+/// contents. As long as every buffer keeps its identity and the ranges stay in
+/// bounds, the same bind group keeps working while the CPU rewrites those
+/// buffers every frame. That is what makes it legal to keep these bind groups
+/// from one frame to the next instead of rebuilding them.
+///
+/// `buffer` is a [`BufferId`](crate::render_resource::BufferId), which
+/// `wgpu`-backed buffers get at creation, so a buffer that is reallocated (grown)
+/// produces a different key and the bind group is rebuilt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct BindingKey {
+    /// The unique ID of the buffer.
+    buffer: u64,
+    /// The byte offset of the slice within the buffer.
+    offset: u64,
+    /// The length of the slice in bytes.
+    size: u64,
+}
+
+impl BindingKey {
+    /// The key for a whole buffer.
+    fn entire(buffer: &Buffer) -> BindingKey {
+        BindingKey {
+            buffer: buffer_identity(buffer),
+            offset: 0,
+            size: buffer.size(),
+        }
+    }
+
+    /// The key for the slice `offset..offset + size` of a buffer.
+    fn slice(buffer: &Buffer, offset: u64, size: u64) -> BindingKey {
+        BindingKey {
+            buffer: buffer_identity(buffer),
+            offset,
+            size,
+        }
+    }
+}
+
+/// The unique ID of a buffer, as a plain number.
+fn buffer_identity(buffer: &Buffer) -> u64 {
+    u64::from(u32::from(NonZero::<u32>::from(buffer.id())))
+}
+
+/// The identity of a whole bind group: the slices it binds, in binding order.
+///
+/// Two keys that compare equal mean the bind group that was created for the
+/// first one is still exactly the bind group the second one wants, so it can be
+/// reused.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct BindGroupKey(pub SmallVec<[BindingKey; 8]>);
+
+impl BindGroupKey {
+    /// An empty key.
+    fn new() -> BindGroupKey {
+        BindGroupKey(SmallVec::new())
+    }
+
+    /// The same key with one more slice at the end.
+    fn with(mut self, key: BindingKey) -> BindGroupKey {
+        self.0.push(key);
+        self
+    }
+}
+
 /// The bind groups for the compute shaders that reset indirect draw counts and
 /// build indirect parameters.
 ///
@@ -397,6 +465,9 @@ impl BuildIndirectParametersBindGroups {
 /// The per-phase set of bind groups for the compute shaders that reset indirect
 /// draw counts and build indirect parameters.
 pub struct PhaseBuildIndirectParametersBindGroups {
+    /// What the four bind groups below captured. They are reused for as long as
+    /// this stays the same.
+    key: PhaseBuildIndirectParametersKey,
     /// The bind group for the `reset_indirect_batch_sets.wesl` shader, for
     /// indexed meshes.
     reset_indexed_indirect_batch_sets: Option<BindGroup>,
@@ -409,6 +480,21 @@ pub struct PhaseBuildIndirectParametersBindGroups {
     /// The bind group for the `build_indirect_params.wesl` shader, for
     /// non-indexed meshes.
     build_non_indexed_indirect: Option<BindGroup>,
+}
+
+/// What the bind groups of one phase's indirect-parameter building captured.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct PhaseBuildIndirectParametersKey {
+    /// The bind group that resets the indirect draw counts of the indexed
+    /// meshes.
+    reset_indexed: Option<BindingKey>,
+    /// The bind group that resets the indirect draw counts of the non-indexed
+    /// meshes.
+    reset_non_indexed: Option<BindingKey>,
+    /// The bind group that builds the indexed meshes' indirect parameters.
+    build_indexed: Option<BindGroupKey>,
+    /// The bind group that builds the non-indexed meshes' indirect parameters.
+    build_non_indexed: Option<BindGroupKey>,
 }
 
 /// A resource, part of the render world, that stores all the bind groups for
@@ -443,6 +529,9 @@ pub struct ViewPhaseBinUnpackingBindGroup {
     /// The number of mesh instances of the appropriate type (indexed or
     /// non-indexed) for this batch set.
     pub mesh_instance_count: u32,
+    /// What [`Self::bind_group`] captured, so it can be reused while that is
+    /// unchanged.
+    key: BindGroupKey,
 }
 
 /// A resource, part of the render world, that stores all the bind groups for
@@ -476,6 +565,9 @@ pub struct ViewPhaseUniformAllocationBindGroup {
     pub bind_group: BindGroup,
     /// The total number of bins in this batch set.
     pub bin_count: u32,
+    /// What [`Self::bind_group`] captured, so it can be reused while that is
+    /// unchanged.
+    key: BindGroupKey,
 }
 
 /// Stops the `GpuPreprocessNode` attempting to generate the buffer for this view
@@ -514,6 +606,10 @@ impl Plugin for GpuMeshPreprocessPlugin {
         render_app
             .init_gpu_resource::<BinUnpackingBindGroups>()
             .init_gpu_resource::<UniformAllocationBindGroups>()
+            // NVForever bind group cache: the indirect parameter bind groups now
+            // live across frames, so the table that holds them has to exist
+            // before the first frame (it used to be inserted by the system).
+            .init_resource::<BuildIndirectParametersBindGroups>()
             .init_gpu_resource::<PreprocessPipelines>()
             .init_gpu_resource::<SpecializedComputePipelines<PreprocessPipeline>>()
             .init_gpu_resource::<SpecializedComputePipelines<ResetIndirectBatchSetsPipeline>>()
@@ -2211,6 +2307,7 @@ pub fn prepare_preprocess_bind_groups(
     pipelines: Res<PreprocessPipelines>,
     mut bin_unpacking_bind_groups: ResMut<BinUnpackingBindGroups>,
     mut uniform_allocation_bind_groups: ResMut<UniformAllocationBindGroups>,
+    mut build_indirect_parameters_bind_groups: ResMut<BuildIndirectParametersBindGroups>,
 ) {
     // Grab the `BatchedInstanceBuffers`.
     let BatchedInstanceBuffers {
@@ -2331,7 +2428,7 @@ pub fn prepare_preprocess_bind_groups(
     // the indirect parameters building shader.
     if any_indirect {
         create_build_indirect_parameters_bind_groups(
-            &mut commands,
+            &mut build_indirect_parameters_bind_groups,
             &render_device,
             &pipeline_cache,
             &pipelines,
@@ -2364,6 +2461,15 @@ pub fn prepare_preprocess_bind_groups(
             &view.retained_view_entity,
         );
     }
+
+    // NVForever skip empty phases: forget the entries of views and (view, phase)
+    // pairs that are gone, so that the two tables do not grow with every view
+    // that ever existed, and so that a dead view's bind groups do not keep its
+    // buffers alive.
+    bin_unpacking_bind_groups
+        .retain(|key, _| scene_unpacking_buffers.view_phase_buffers.contains_key(key));
+    uniform_allocation_bind_groups
+        .retain(|key, _| scene_unpacking_buffers.view_phase_buffers.contains_key(key));
 }
 
 /// A temporary structure that stores all the information needed to construct
@@ -3109,11 +3215,94 @@ impl<'a> PreprocessBindGroupBuilder<'a> {
     }
 }
 
+/// The key for a phase's indirect-parameter bind groups: everything the four
+/// bind groups created below capture.
+///
+/// Note that the phase's *buffers* stay allocated from frame to frame, so a
+/// phase that has nothing to draw this frame still has `Some` buffers; the
+/// caller skips those with `batch_count()` before asking for a key.
+fn build_indirect_parameters_key(
+    phase_indirect_parameters_buffer: &UntypedPhaseIndirectParametersBuffers,
+    current_input_buffer: &Buffer,
+    indirect_parameters_build_jobs: &IndirectParametersBuildJobs,
+) -> PhaseBuildIndirectParametersKey {
+    let job_buffer = indirect_parameters_build_jobs.buffer();
+    let job_slice = |buffer: &Buffer| {
+        BindingKey::slice(
+            buffer,
+            0,
+            size_of::<IndirectParametersBuildJob>() as u64,
+        )
+    };
+
+    PhaseBuildIndirectParametersKey {
+        reset_indexed: phase_indirect_parameters_buffer
+            .indexed
+            .batch_sets_buffer()
+            .map(BindingKey::entire),
+        reset_non_indexed: phase_indirect_parameters_buffer
+            .non_indexed
+            .batch_sets_buffer()
+            .map(BindingKey::entire),
+        build_indexed: match (
+            phase_indirect_parameters_buffer.indexed.metadata_buffer(),
+            phase_indirect_parameters_buffer.indexed.data_buffer(),
+            phase_indirect_parameters_buffer.indexed.batch_sets_buffer(),
+            job_buffer,
+        ) {
+            (Some(metadata), Some(data), Some(batch_sets), Some(jobs)) => Some(
+                BindGroupKey::new()
+                    .with(BindingKey::entire(current_input_buffer))
+                    .with(BindingKey::entire(metadata))
+                    .with(BindingKey::entire(batch_sets))
+                    .with(job_slice(jobs))
+                    .with(BindingKey::entire(data)),
+            ),
+            _ => None,
+        },
+        build_non_indexed: match (
+            phase_indirect_parameters_buffer
+                .non_indexed
+                .metadata_buffer(),
+            phase_indirect_parameters_buffer.non_indexed.data_buffer(),
+            phase_indirect_parameters_buffer
+                .non_indexed
+                .batch_sets_buffer(),
+            job_buffer,
+        ) {
+            (Some(metadata), Some(data), Some(batch_sets), Some(jobs)) => Some(
+                BindGroupKey::new()
+                    .with(BindingKey::entire(current_input_buffer))
+                    .with(
+                        // The shader reads the length of this one, so the size is
+                        // the batch count, not the buffer's; with no batches the
+                        // original code passes no size, which binds the rest of
+                        // the buffer.
+                        match NonZeroU64::new(
+                            phase_indirect_parameters_buffer
+                                .non_indexed
+                                .batch_count()
+                                .saturating_mul(size_of::<IndirectParametersMetadata>())
+                                as u64,
+                        ) {
+                            Some(size) => BindingKey::slice(metadata, 0, size.get()),
+                            None => BindingKey::entire(metadata),
+                        },
+                    )
+                    .with(BindingKey::entire(batch_sets))
+                    .with(job_slice(jobs))
+                    .with(BindingKey::entire(data)),
+            ),
+            _ => None,
+        },
+    }
+}
+
 /// A system that creates bind groups from the indirect parameters metadata and
 /// data buffers for the indirect batch set reset shader and the indirect
 /// parameter building shader.
 fn create_build_indirect_parameters_bind_groups(
-    commands: &mut Commands,
+    build_indirect_parameters_bind_groups: &mut BuildIndirectParametersBindGroups,
     render_device: &RenderDevice,
     pipeline_cache: &PipelineCache,
     pipelines: &PreprocessPipelines,
@@ -3121,12 +3310,43 @@ fn create_build_indirect_parameters_bind_groups(
     indirect_parameters_buffers: &IndirectParametersBuffers,
     indirect_parameters_build_jobs: &IndirectParametersBuildJobs,
 ) {
-    let mut build_indirect_parameters_bind_groups = BuildIndirectParametersBindGroups::new();
-
     for (phase_type_id, phase_indirect_parameters_buffer) in indirect_parameters_buffers.iter() {
+        // NVForever skip empty phases: a phase's buffers live as long as the
+        // phase does (`UninitBufferVec`/`RawBufferVec` keep their allocation
+        // when the frame that filled them ends), so `batch_sets_buffer()` and
+        // `metadata_buffer()` are `Some` even for a phase that has nothing to
+        // draw this frame. `batch_count()` is the count the batching actually
+        // allocated *this* frame, so it is the honest emptiness test. Four bind
+        // groups per phase is a large share of this system's cost, and none of
+        // them is ever dispatched with when the phase is empty.
+        if phase_indirect_parameters_buffer
+            .indexed
+            .batch_count()
+            .saturating_add(phase_indirect_parameters_buffer.non_indexed.batch_count())
+            == 0
+        {
+            continue;
+        }
+
+        // NVForever bind group cache: the four bind groups below only change
+        // when one of their buffers or slices does, so reuse them when the key
+        // is the same as last frame's.
+        let key = build_indirect_parameters_key(
+            phase_indirect_parameters_buffer,
+            current_input_buffer,
+            indirect_parameters_build_jobs,
+        );
+        if build_indirect_parameters_bind_groups
+            .get(phase_type_id)
+            .is_some_and(|existing| existing.key == key)
+        {
+            continue;
+        }
+
         build_indirect_parameters_bind_groups.insert(
             *phase_type_id,
             PhaseBuildIndirectParametersBindGroups {
+                key,
                 reset_indexed_indirect_batch_sets: phase_indirect_parameters_buffer
                     .indexed
                     .batch_sets_buffer()
@@ -3311,7 +3531,19 @@ fn create_build_indirect_parameters_bind_groups(
         );
     }
 
-    commands.insert_resource(build_indirect_parameters_bind_groups);
+    // Forget the phases that are gone or that have nothing this frame (see
+    // `build_indirect_parameters_key`'s emptiness note above).
+    build_indirect_parameters_bind_groups.retain(|phase_type_id, _| {
+        indirect_parameters_buffers
+            .get(*phase_type_id)
+            .is_some_and(|buffers| {
+                buffers
+                    .indexed
+                    .batch_count()
+                    .saturating_add(buffers.non_indexed.batch_count())
+                    > 0
+            })
+    });
 }
 
 /// Creates all bind groups needed to run the `unpack_bins` shader for all the
@@ -3344,12 +3576,13 @@ fn create_bin_unpacking_bind_groups(
         else {
             continue;
         };
-        let Some(view_phase_bin_unpacking_buffers) = scene_unpacking_buffers
-            .view_phase_buffers
-            .get(&SceneUnpackingBuffersKey {
-                phase: *phase_type_id,
-                view: *view_entity,
-            })
+
+        let key = SceneUnpackingBuffersKey {
+            phase: *phase_type_id,
+            view: *view_entity,
+        };
+        let Some(view_phase_bin_unpacking_buffers) =
+            scene_unpacking_buffers.view_phase_buffers.get(&key)
         else {
             continue;
         };
@@ -3366,56 +3599,99 @@ fn create_bin_unpacking_bind_groups(
             } => non_indexed.buffer(),
         };
 
-        // Create the actual bind groups.
+        // Create the actual bind groups, reusing the ones from the previous
+        // frame whose key is unchanged (NVForever bind group cache).
+        let (indexed, non_indexed, unchanged) = {
+            let cached = bin_unpacking_bind_groups.get(&key);
+            let indexed: Vec<_> = match maybe_indexed_work_item_buffer {
+                Some(indexed_work_item_buffer) => view_phase_bin_unpacking_buffers
+                    .indexed_unpacking_jobs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, job)| {
+                        create_bin_unpacking_bind_group(
+                            render_device,
+                            preprocess_pipelines,
+                            pipeline_cache,
+                            job,
+                            bin_unpacking_metadata_buffer,
+                            indexed_work_item_buffer,
+                            true,
+                            cached.and_then(|cached| cached.indexed.get(index)),
+                        )
+                    })
+                    .collect(),
+                None => vec![],
+            };
+            let non_indexed: Vec<_> = match maybe_non_indexed_work_item_buffer {
+                Some(non_indexed_work_item_buffer) => view_phase_bin_unpacking_buffers
+                    .non_indexed_unpacking_jobs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, job)| {
+                        create_bin_unpacking_bind_group(
+                            render_device,
+                            preprocess_pipelines,
+                            pipeline_cache,
+                            job,
+                            bin_unpacking_metadata_buffer,
+                            non_indexed_work_item_buffer,
+                            false,
+                            cached.and_then(|cached| cached.non_indexed.get(index)),
+                        )
+                    })
+                    .collect(),
+                None => vec![],
+            };
+            // Every bind group was reused: leave the table alone, so the old
+            // entries (and the bind groups in them) are not dropped and rebuilt.
+            // The dispatch counts are part of "unchanged" because they are read
+            // from this table when the shader is dispatched.
+            let unchanged = cached.is_some_and(|cached| {
+                cached.indexed.len() == indexed.len()
+                    && cached.non_indexed.len() == non_indexed.len()
+                    && cached
+                        .indexed
+                        .iter()
+                        .zip(&indexed)
+                        .all(|(old, new)| {
+                            old.key == new.key && old.mesh_instance_count == new.mesh_instance_count
+                        })
+                    && cached
+                        .non_indexed
+                        .iter()
+                        .zip(&non_indexed)
+                        .all(|(old, new)| {
+                            old.key == new.key && old.mesh_instance_count == new.mesh_instance_count
+                        })
+            });
+            (indexed, non_indexed, unchanged)
+        };
+        if unchanged {
+            continue;
+        }
+
+        // NVForever skip empty phases: don't store an entry for a pair with
+        // nothing to unpack. The dispatch loops look the entry up by key and
+        // skip a pair that has none, so storing an empty one would only cost an
+        // insert and an allocation.
+        if indexed.is_empty() && non_indexed.is_empty() {
+            continue;
+        }
+
         bin_unpacking_bind_groups.insert(
-            SceneUnpackingBuffersKey {
-                phase: *phase_type_id,
-                view: *view_entity,
-            },
+            key,
             ViewPhaseBinUnpackingBindGroups {
-                indexed: match maybe_indexed_work_item_buffer {
-                    Some(indexed_work_item_buffer) => view_phase_bin_unpacking_buffers
-                        .indexed_unpacking_jobs
-                        .iter()
-                        .map(|job| {
-                            create_bin_unpacking_bind_group(
-                                render_device,
-                                preprocess_pipelines,
-                                pipeline_cache,
-                                job,
-                                bin_unpacking_metadata_buffer,
-                                indexed_work_item_buffer,
-                                true,
-                            )
-                        })
-                        .collect(),
-                    None => vec![],
-                },
-                non_indexed: match maybe_non_indexed_work_item_buffer {
-                    Some(non_indexed_work_item_buffer) => view_phase_bin_unpacking_buffers
-                        .non_indexed_unpacking_jobs
-                        .iter()
-                        .map(|job| {
-                            create_bin_unpacking_bind_group(
-                                render_device,
-                                preprocess_pipelines,
-                                pipeline_cache,
-                                job,
-                                bin_unpacking_metadata_buffer,
-                                non_indexed_work_item_buffer,
-                                false,
-                            )
-                        })
-                        .collect(),
-                    None => vec![],
-                },
+                indexed,
+                non_indexed,
             },
         );
     }
 }
 
 /// Creates a bind group for the bin unpacking shader for a single (view, phase,
-/// mesh indexed-ness) combination.
+/// mesh indexed-ness) combination, reusing `cached` when it still describes the
+/// same inputs.
 fn create_bin_unpacking_bind_group(
     render_device: &RenderDevice,
     preprocess_pipelines: &PreprocessPipelines,
@@ -3424,7 +3700,27 @@ fn create_bin_unpacking_bind_group(
     bin_unpacking_metadata_buffer: &Buffer,
     work_item_buffer: &Buffer,
     indexed: bool,
+    cached: Option<&ViewPhaseBinUnpackingBindGroup>,
 ) -> ViewPhaseBinUnpackingBindGroup {
+    // NVForever bind group cache: this must list exactly the bindings below.
+    let key = BindGroupKey::new()
+        .with(BindingKey::slice(
+            bin_unpacking_metadata_buffer,
+            job.bin_unpacking_metadata_index.uniform_offset() as u64,
+            size_of::<GpuBinUnpackingMetadata>() as u64,
+        ))
+        .with(BindingKey::entire(&job.render_binned_mesh_instance_buffer))
+        .with(BindingKey::entire(work_item_buffer))
+        .with(BindingKey::entire(&job.bin_metadata_buffer))
+        .with(BindingKey::entire(&job.bin_index_to_bin_metadata_index_buffer));
+
+    if let Some(cached) = cached
+        && cached.key == key
+        && cached.mesh_instance_count == job.mesh_instance_count
+    {
+        return cached.clone();
+    }
+
     let bind_group = render_device.create_bind_group(
         if indexed {
             "bin unpacking indexed bind group"
@@ -3463,6 +3759,7 @@ fn create_bin_unpacking_bind_group(
         metadata_index: job.bin_unpacking_metadata_index,
         bind_group,
         mesh_instance_count: job.mesh_instance_count,
+        key,
     }
 }
 
@@ -3484,73 +3781,106 @@ fn create_uniform_allocation_bind_groups(
     };
 
     for (phase_type_id, phase_indirect_parameters_buffers) in indirect_parameters_buffers.iter() {
-        let Some(view_phase_bin_unpacking_buffers) = scene_unpacking_buffers
-            .view_phase_buffers
-            .get(&SceneUnpackingBuffersKey {
-                phase: *phase_type_id,
-                view: *view_entity,
-            })
+        let key = SceneUnpackingBuffersKey {
+            phase: *phase_type_id,
+            view: *view_entity,
+        };
+        let Some(view_phase_bin_unpacking_buffers) =
+            scene_unpacking_buffers.view_phase_buffers.get(&key)
         else {
             continue;
         };
 
-        // Create the actual bind groups.
+        // Create the actual bind groups, reusing the ones from the previous
+        // frame whose key is unchanged (NVForever bind group cache).
+        let (indexed, non_indexed, unchanged) = {
+            let cached = uniform_allocation_bind_groups.get(&key);
+            let indexed: Vec<_> = match phase_indirect_parameters_buffers.indexed.metadata_buffer()
+            {
+                None => vec![],
+                Some(indexed_indirect_parameters_metadata_buffer) => {
+                    view_phase_bin_unpacking_buffers
+                        .indexed_unpacking_jobs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, job)| {
+                            create_uniform_allocation_bind_group(
+                                render_device,
+                                preprocess_pipelines,
+                                pipeline_cache,
+                                job,
+                                uniform_allocation_metadata_buffer,
+                                indexed_indirect_parameters_metadata_buffer,
+                                true,
+                                cached.and_then(|cached| cached.indexed.get(index)),
+                            )
+                        })
+                        .collect()
+                }
+            };
+            let non_indexed: Vec<_> = match phase_indirect_parameters_buffers
+                .non_indexed
+                .metadata_buffer()
+            {
+                None => vec![],
+                Some(non_indexed_indirect_parameters_metadata_buffer) => {
+                    view_phase_bin_unpacking_buffers
+                        .non_indexed_unpacking_jobs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, job)| {
+                            create_uniform_allocation_bind_group(
+                                render_device,
+                                preprocess_pipelines,
+                                pipeline_cache,
+                                job,
+                                uniform_allocation_metadata_buffer,
+                                non_indexed_indirect_parameters_metadata_buffer,
+                                false,
+                                cached.and_then(|cached| cached.non_indexed.get(index)),
+                            )
+                        })
+                        .collect()
+                }
+            };
+            let unchanged = cached.is_some_and(|cached| {
+                cached.indexed.len() == indexed.len()
+                    && cached.non_indexed.len() == non_indexed.len()
+                    && cached
+                        .indexed
+                        .iter()
+                        .zip(&indexed)
+                        .all(|(old, new)| old.key == new.key && old.bin_count == new.bin_count)
+                    && cached
+                        .non_indexed
+                        .iter()
+                        .zip(&non_indexed)
+                        .all(|(old, new)| old.key == new.key && old.bin_count == new.bin_count)
+            });
+            (indexed, non_indexed, unchanged)
+        };
+        if unchanged {
+            continue;
+        }
+
+        // NVForever skip empty phases: see `create_bin_unpacking_bind_groups`.
+        if indexed.is_empty() && non_indexed.is_empty() {
+            continue;
+        }
+
         uniform_allocation_bind_groups.insert(
-            SceneUnpackingBuffersKey {
-                phase: *phase_type_id,
-                view: *view_entity,
-            },
+            key,
             ViewPhaseUniformAllocationBindGroups {
-                indexed: match phase_indirect_parameters_buffers.indexed.metadata_buffer() {
-                    None => vec![],
-                    Some(indexed_indirect_parameters_metadata_buffer) => {
-                        view_phase_bin_unpacking_buffers
-                            .indexed_unpacking_jobs
-                            .iter()
-                            .map(|job| {
-                                create_uniform_allocation_bind_group(
-                                    render_device,
-                                    preprocess_pipelines,
-                                    pipeline_cache,
-                                    job,
-                                    uniform_allocation_metadata_buffer,
-                                    indexed_indirect_parameters_metadata_buffer,
-                                    true,
-                                )
-                            })
-                            .collect()
-                    }
-                },
-                non_indexed: match phase_indirect_parameters_buffers
-                    .non_indexed
-                    .metadata_buffer()
-                {
-                    None => vec![],
-                    Some(non_indexed_indirect_parameters_metadata_buffer) => {
-                        view_phase_bin_unpacking_buffers
-                            .non_indexed_unpacking_jobs
-                            .iter()
-                            .map(|job| {
-                                create_uniform_allocation_bind_group(
-                                    render_device,
-                                    preprocess_pipelines,
-                                    pipeline_cache,
-                                    job,
-                                    uniform_allocation_metadata_buffer,
-                                    non_indexed_indirect_parameters_metadata_buffer,
-                                    false,
-                                )
-                            })
-                            .collect()
-                    }
-                },
+                indexed,
+                non_indexed,
             },
         );
     }
 }
 
 /// Creates a bind group for the uniform allocation shader for a single (view,
-/// phase, mesh indexed-ness) combination.
+/// phase, mesh indexed-ness) combination, reusing `cached` when it still
+/// describes the same inputs.
 fn create_uniform_allocation_bind_group(
     render_device: &RenderDevice,
     preprocess_pipelines: &PreprocessPipelines,
@@ -3559,7 +3889,26 @@ fn create_uniform_allocation_bind_group(
     uniform_allocation_metadata_buffer: &Buffer,
     indirect_parameters_metadata_buffer: &Buffer,
     indexed: bool,
+    cached: Option<&ViewPhaseUniformAllocationBindGroup>,
 ) -> ViewPhaseUniformAllocationBindGroup {
+    // NVForever bind group cache: this must list exactly the bindings below.
+    let key = BindGroupKey::new()
+        .with(BindingKey::slice(
+            uniform_allocation_metadata_buffer,
+            job.uniform_allocation_metadata_index.uniform_offset() as u64,
+            size_of::<GpuUniformAllocationMetadata>() as u64,
+        ))
+        .with(BindingKey::entire(&job.bin_metadata_buffer))
+        .with(BindingKey::entire(indirect_parameters_metadata_buffer))
+        .with(BindingKey::entire(&job.fan_buffer));
+
+    if let Some(cached) = cached
+        && cached.key == key
+        && cached.bin_count == job.bin_count
+    {
+        return cached.clone();
+    }
+
     let bind_group = render_device.create_bind_group(
         if indexed {
             "uniform allocation indexed bind group"
@@ -3596,6 +3945,7 @@ fn create_uniform_allocation_bind_group(
         metadata_index: job.uniform_allocation_metadata_index,
         bind_group,
         bin_count: job.bin_count,
+        key,
     }
 }
 
