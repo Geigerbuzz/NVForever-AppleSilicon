@@ -740,6 +740,21 @@ impl Pictures {
     pub fn picture_sized(&mut self, path: &str, texatlas: Option<&str>, data: Option<&GameData>, images: &mut Assets<Image>, bc: bool) -> Option<SizedPicture> {
         let data = data?;
         let at = self.locate(path, texatlas, &|p| data.read(p));
+        // Test aid `NVF_TRACE_PICTURES=1`: say which file a picture came from and whether
+        // it was a loose file (a mod's, which outranks the archives) or an archive's.
+        // Written after three attempts to prove an icon-pack replacement was applied
+        // were inconclusive: the frame showed the vanilla icon and no path was ever
+        // named, so the question could not be answered from the picture alone.
+        if std::env::var_os("NVF_TRACE_PICTURES").is_some() {
+            info!(
+                requested = %path,
+                texture = %at.texture,
+                piece = at.part.is_some(),
+                source = data.vfs.source_of(&at.texture).unwrap_or("<none>"),
+                loose = ?data.vfs.loose_path(&at.texture),
+                "picture"
+            );
+        }
         if let Some([x, y, w, h]) = at.part {
             if let Some((image, size)) = self.texture(at.texture, data, images, bc) {
                 let rect = Rect::new(x * size.x, y * size.y, (x + w) * size.x, (y + h) * size.y);
@@ -752,14 +767,25 @@ impl Pictures {
     /// A picture read from its own file only, with its size in texels: no atlas looked in
     /// (a whole menu's image without `texatlas`, `crate::tiles::draw::Source::Own`).
     pub fn own_sized(&mut self, path: &str, data: Option<&GameData>, images: &mut Assets<Image>, bc: bool) -> Option<SizedPicture> {
-        self.texture(own_texture(path), data?, images, bc).map(|(image, size)| (image, None, size))
+        let data = data?;
+        let own = own_texture(path);
+        if std::env::var_os("NVF_TRACE_PICTURES").is_some() {
+            info!(requested = %path, texture = %own, source = data.vfs.source_of(&own).unwrap_or("<none>"),
+                  loose = ?data.vfs.loose_path(&own), "picture (own file)");
+        }
+        self.texture(own, data, images, bc).map(|(image, size)| (image, None, size))
     }
 
     /// A texture by the full game path a model names it by (`textures\…`), read once and
     /// kept, with its size in texels: the tile HUD's `nif` tiles' pieces
     /// (`crate::tiles::model`).
     pub fn file(&mut self, path: &str, data: &GameData, images: &mut Assets<Image>, bc: bool) -> Option<(Handle<Image>, Vec2)> {
-        self.texture(path.trim().to_ascii_lowercase(), data, images, bc)
+        let p = path.trim().to_ascii_lowercase();
+        if std::env::var_os("NVF_TRACE_PICTURES").is_some() {
+            info!(texture = %p, source = data.vfs.source_of(&p).unwrap_or("<none>"),
+                  loose = ?data.vfs.loose_path(&p), "picture (full path)");
+        }
+        self.texture(p, data, images, bc)
     }
 
     /// The game path of the texture a picture was read from: its atlas's when
