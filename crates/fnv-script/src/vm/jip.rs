@@ -125,10 +125,11 @@ pub const JIP_NAMES: [&str; 1] = ["JIP NVSE Plugin"];
 ///
 /// UIO has no script functions: the engine reads its `uio\public` lists itself
 /// (`fnv_ui`), which is all the plugin does for a mod that asks whether it is there.
-/// Not reported, though the catalogue has functions of theirs: yUI (its two ySI trait
-/// functions are built, its menus are not, and a mod that finds it goes on to read its
-/// tiles), and the plugins whose registered name no page gives (ITR, One111, ppNVSE,
-/// vheyes-nvse and the smaller ones): ext-version.md §6.
+/// Not reported, though the catalogue has functions of theirs: yUI (its three ySI
+/// trait functions are built — ySIGetTrait, ySISetTrait, ySIGetTagTrait — its menus are
+/// not, and a mod that finds it goes on to read its tiles), and the plugins whose
+/// registered name no page gives (ITR, One111, ppNVSE, vheyes-nvse and the smaller ones):
+/// ext-version.md §6.
 pub const PLUGINS: [(&str, f64); 15] = [
     ("JIP NVSE Plugin", JIP_VERSION),
     ("JIP LN NVSE", JIP_VERSION),
