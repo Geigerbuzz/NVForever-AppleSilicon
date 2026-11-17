@@ -214,18 +214,31 @@ impl Vfs {
     }
 
     /// [`Vfs::archive_order`], with the plugins' archives also looked for in NVForever's
-    /// mods folder `mods`, beside the plugins it holds (docs/design/editor.md §2.2 item 9).
-    /// One found there is named by its full path ([`Vfs::open`] joins a relative name to
-    /// `data_dir`); a name in both folders is the mods folder's, as a plugin is
-    /// (`fnv_install::plugins::plugin_path`). The base list and `Update.bsa` come from
-    /// `data_dir` only.
+    /// mods layer `mods`, beside the plugins it holds (docs/design/editor.md §2.2 item 9).
+    /// The layer holds one folder per mod ([`fnv_install::mods`]), so a mod's archive is
+    /// `mods/<Mod>/<name>` and is named by its full path ([`Vfs::open`] joins a relative
+    /// name to `data_dir`). A name found there is the mods layer's whatever `data_dir` has,
+    /// and the higher-precedence mod's (`mods.txt`, top wins) beats a lower one's. The base
+    /// list and `Update.bsa` come from `data_dir` only.
     pub fn archive_order_in(data_dir: &Path, mods: Option<&Path>, archive_list: &[&str], plugins: &[&str]) -> Vec<String> {
         let present = top_archives(data_dir);
-        let in_mods: Vec<String> = mods.map(top_archives).unwrap_or_default();
-        // Each plugin archive's name, and what `Vfs::open` is given for it.
-        let mut owned: Vec<(String, String)> = present.iter().filter(|n| !in_mods.iter().any(|m| m.eq_ignore_ascii_case(n))).map(|n| (n.clone(), n.clone())).collect();
-        if let Some(m) = mods {
-            owned.extend(in_mods.iter().map(|n| (n.clone(), m.join(n).to_string_lossy().into_owned())));
+        // Every archive the plugins may claim, lowest precedence first, so a later (higher)
+        // copy replaces an earlier one: the mods layer's roots (the mods folder itself, then
+        // one folder per mod), then Data's own.
+        let mut owned: Vec<(String, String)> = Vec::new();
+        for root in mods.map(fnv_install::mods::mod_roots).unwrap_or_default() {
+            for n in top_archives(&root) {
+                let open_as = root.join(&n).to_string_lossy().into_owned();
+                match owned.iter_mut().find(|(x, _)| x.eq_ignore_ascii_case(&n)) {
+                    Some(e) => *e = (n, open_as),
+                    None => owned.push((n, open_as)),
+                }
+            }
+        }
+        for n in &present {
+            if !owned.iter().any(|(x, _)| x.eq_ignore_ascii_case(n)) {
+                owned.push((n.clone(), n.clone()));
+            }
         }
         Vfs::order_from_owned(&owned, &present, archive_list, plugins)
     }
@@ -401,66 +414,22 @@ impl Vfs {
         if let Some(root) = mods {
             // An absent optional layer is ordinary; other errors retain walk's diagnostics.
             if !matches!(root.try_exists(), Ok(false)) {
-                // The mods folder holds ONE FOLDER PER MOD, and each of those is an overlay
-                // root: a mod's `textures/` is the game's `textures/`, not
-                // `mods/<Mod Name>/textures/`. Indexing the mods folder itself put every
-                // file behind its own mod's folder name, where no asset path looks, so mod
-                // *records* loaded (the plugin is found by name) while mod *assets* were
-                // never seen: a Pip-Boy icon pack installed at exactly the right path still
-                // resolved to the vanilla archive entry, and every texture mod measured 0%.
-                // Later folders win over earlier ones (name order), as a load order's later
-                // mod does. A file lying directly in the mods folder is not an asset.
-                let mut payloads: Vec<PathBuf> = std::fs::read_dir(root)
-                    .map(|rd| {
-                        rd.flatten()
-                            .map(|e| e.path())
-                            .filter(|p| p.is_dir())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                payloads.sort();
-                // An explicit precedence replaces the alphabetical default: `mods/mods.txt`,
-                // one folder per line, TOP WINS. Named folders are indexed last-to-first so
-                // the first line is inserted last (highest precedence); a folder not named
-                // there is indexed below every named one, in name order. So a freshly
-                // installed mod lands at the BOTTOM and cannot silently outrank a curated
-                // order — the failure that made MUVAT 2K override 40 clothing textures and
-                // an old Pip-Boy icon pack hide all five v5 packs.
-                if let Ok(text) = std::fs::read_to_string(root.join("mods.txt")) {
-                    let mut named: Vec<String> = Vec::new();
-                    for line in text.lines() {
-                        let l = line.trim();
-                        if l.is_empty() || l.starts_with('#') {
-                            continue;
-                        }
-                        let l = l.trim_start_matches(['*', '!', '+', ' ']);
-                        if !l.is_empty() {
-                            named.push(l.to_string());
-                        }
+                if root.is_dir() {
+                    // The mods folder holds ONE FOLDER PER MOD, and each of those is an overlay
+                    // root: a mod's `textures/` is the game's `textures/`, not
+                    // `mods/<Mod Name>/textures/`. Indexing the mods folder itself put every
+                    // file behind its own mod's folder name, where no asset path looks, so mod
+                    // *records* loaded (the plugin is found by name) while mod *assets* were
+                    // never seen: a Pip-Boy icon pack installed at exactly the right path still
+                    // resolved to the vanilla archive entry, and every texture mod measured 0%.
+                    // Later folders win over earlier ones (name order, or `mods.txt`), as a
+                    // load order's later mod does. A file lying directly in the mods folder is
+                    // not an asset.
+                    for payload in fnv_install::mods::mod_folders(root) {
+                        vfs.index_loose(&payload);
                     }
-                    let find = |name: &str| {
-                        payloads
-                            .iter()
-                            .find(|p| p.file_name().and_then(|s| s.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(name)))
-                            .cloned()
-                    };
-                    let mut order: Vec<PathBuf> = Vec::new();
-                    for p in &payloads {
-                        let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                        if !named.iter().any(|x| x.eq_ignore_ascii_case(n)) {
-                            order.push(p.clone());
-                        }
-                    }
-                    for name in named.iter().rev() {
-                        match find(name) {
-                            Some(p) => order.push(p),
-                            None => tracing::warn!(mods_txt = %name, "mods.txt names a folder that is not installed"),
-                        }
-                    }
-                    payloads = order;
-                }
-                for payload in &payloads {
-                    vfs.index_loose(payload);
+                } else {
+                    vfs.skipped.push((root.display().to_string(), "the mods layer is not a folder".into()));
                 }
             }
         }
@@ -870,24 +839,39 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A plugin in NVForever's mods folder brings the archives beside it, named by their
-    /// full path; one in both folders is the mods folder's copy.
+    /// A plugin in a mod's own folder brings the archives beside it, named by their full
+    /// path; a name the mods layer has wins over Data's, and the higher-precedence mod's
+    /// (`mods.txt`, top wins) over a lower one's.
     #[test]
-    fn mods_folder_archives_follow_their_plugins() {
+    fn mod_folder_archives_follow_their_plugins() {
         let root = std::env::temp_dir().join(format!("nvf-vfs-modsdir-{}", std::process::id()));
         let (data, mods) = (root.join("Data"), root.join("mods"));
-        std::fs::create_dir_all(&data).unwrap();
-        std::fs::create_dir_all(&mods).unwrap();
+        for d in [&data, &mods, &mods.join("Alpha"), &mods.join("Bravo")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
         for n in ["Fallout - Meshes.bsa", "Update.bsa", "Both.bsa"] {
             std::fs::write(data.join(n), b"").unwrap();
         }
-        for n in ["Edits.bsa", "Edits - Textures.bsa", "Both.bsa", "Update.bsa", "Stray.bsa"] {
-            std::fs::write(mods.join(n), b"").unwrap();
+        // Alpha is the top line of mods.txt, so its archives win over Bravo's and Data's.
+        for n in ["Edits.bsa", "Edits - Textures.bsa", "Both.bsa", "Stray.bsa"] {
+            std::fs::write(mods.join("Alpha").join(n), b"").unwrap();
         }
-        let full = |n: &str| mods.join(n).to_string_lossy().into_owned();
-        let order = Vfs::archive_order_in(&data, Some(&mods), &DEFAULT_ARCHIVE_LIST, &["FalloutNV.esm", "Both.esp", "Edits.esp"]);
-        // The base list and Update.bsa only from Data; no plugin claims Stray.bsa.
-        assert_eq!(order, ["Fallout - Meshes.bsa".to_string(), "Update.bsa".into(), full("Both.bsa"), full("Edits - Textures.bsa"), full("Edits.bsa")]);
+        std::fs::write(mods.join("Bravo").join("Both.bsa"), b"").unwrap();
+        std::fs::write(mods.join("Bravo").join("Lower.bsa"), b"").unwrap();
+        // A flat archive at the mods folder's own top level: the base list still comes from
+        // Data only, so this copy of Update.bsa is not the one named.
+        std::fs::write(mods.join("Update.bsa"), b"").unwrap();
+        std::fs::write(mods.join("mods.txt"), "Alpha\nBravo\n").unwrap();
+        let full = |n: &str| mods.join("Alpha").join(n).to_string_lossy().into_owned();
+        let order = Vfs::archive_order_in(&data, Some(&mods), &DEFAULT_ARCHIVE_LIST, &["FalloutNV.esm", "Both.esp", "Edits.esp", "Lower.esp"]);
+        // The base list and Update.bsa only from Data; no plugin claims Stray.bsa. Each
+        // plugin's own archives come in the load order: Both's (Alpha's copy, not Bravo's
+        // or Data's), then Edits' (Textures before the plain archive), then Lower's.
+        assert_eq!(
+            order,
+            ["Fallout - Meshes.bsa".to_string(), "Update.bsa".into(), full("Both.bsa"), full("Edits - Textures.bsa"), full("Edits.bsa"), mods.join("Bravo").join("Lower.bsa").to_string_lossy().into_owned()]
+        );
+        assert!(!order.iter().any(|n| n.ends_with("Stray.bsa")));
         // Without a mods folder, as before.
         assert_eq!(Vfs::archive_order_in(&data, None, &DEFAULT_ARCHIVE_LIST, &["FalloutNV.esm", "Both.esp", "Edits.esp"]), ["Fallout - Meshes.bsa", "Update.bsa", "Both.bsa"]);
         std::fs::remove_dir_all(&root).unwrap();

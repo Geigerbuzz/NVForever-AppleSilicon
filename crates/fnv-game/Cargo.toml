@@ -126,3 +126,8 @@ path = "tests/crosshair_water.rs"
 [[test]]
 name = "crosshair_prompt_events"
 path = "tests/crosshair_prompt_events.rs"
+# A mod's own folder is a read root (Config, Script Runner): its own binary, since Roots is
+# process-wide.
+[[test]]
+name = "mod_files_mod_roots"
+path = "tests/mod_files_mod_roots.rs"

@@ -26,10 +26,13 @@
 //! game's own files]. Lines are never removed: a plugin no longer in `Data` is skipped
 //! with a warning, and comes back on if the file returns.
 //!
-//! Plugins in NVForever's own mods folder (`<home>\mods\`, [`EngineHome::mods`]) count as
-//! present too, and get their lines the same way. A plugin there is opened instead of a
-//! plugin of the same name in `Data` ([`plugin_path`]), so a mod can replace a file of the
-//! game's without touching it [design].
+//! Plugins in NVForever's own mods layer (`<home>\mods\`, [`EngineHome::mods`]) count as
+//! present too, and get their lines the same way. The layer holds one folder per mod, and
+//! each of those is an overlay root ([`crate::mods`]), so a plugin is found in the mod's
+//! own folder (`mods\JAM\JustAssortedMods.esp`) — in `mods.txt` precedence order — as well
+//! as directly in `mods\`, where editor mode writes its own. A plugin there is opened
+//! instead of a plugin of the same name in `Data` ([`plugin_path`]), so a mod can replace a
+//! file of the game's without touching it [design].
 //!
 //! **Language plugins** (#1443): a localized install can keep the English masters and put
 //! its text in one more plugin per master, `<master>_lang.esp` [observed: a Russian
@@ -137,6 +140,34 @@ fn plugins_in(dir: &Path) -> std::io::Result<Vec<String>> {
         .collect())
 }
 
+/// The plugins of the mods layer `mods`, **highest precedence first**: every lookup root
+/// of [`crate::mods::mod_roots`] (the mods folder itself and one folder per installed mod,
+/// `mods.txt`'s top line winning), a name once, as the winning root spells it.
+///
+/// The layer holds ONE FOLDER PER MOD, so a plugin is `mods/Alpha/A.esp` — reading only the
+/// mods folder's own top level (where no mod's plugin lies) found none of them, and a plain
+/// start loaded no mod at all.
+fn mod_plugins(mods: &Path) -> std::io::Result<Vec<String>> {
+    match std::fs::read_dir(mods) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    }
+    let mut names: Vec<String> = Vec::new();
+    for root in crate::mods::mod_roots(mods).into_iter().rev() {
+        let Ok(rd) = std::fs::read_dir(&root) else { continue };
+        let mut here: Vec<String> = rd.flatten().filter(|e| e.path().is_file()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| is_plugin(n)).collect();
+        here.sort();
+        for n in here {
+            if !names.iter().any(|x| x.eq_ignore_ascii_case(&n)) {
+                names.push(n);
+            }
+        }
+    }
+    Ok(names)
+}
+
+
 /// The game's masters in their order, then the other `.esm` files, then the language
 /// plugins in their masters' order, then the other `.esp` files by name.
 fn sort_plugins(names: &mut [String]) {
@@ -150,15 +181,12 @@ pub fn data_plugins(game: &GameInstall) -> Result<Vec<String>, InstallError> {
     Ok(names)
 }
 
-/// The plugins of `Data` and of the mods folder `mods` together, in [`data_plugins`]'
-/// order; a name in both is listed once, as the mods folder names it. A missing mods
-/// folder has no plugins.
+/// The plugins of the mods layer `mods` (each mod folder and the mods folder itself, in
+/// `mods.txt` precedence) and of `Data` together, in [`data_plugins`]' order; a name in both
+/// is listed once, as the higher-precedence copy names it. A missing mods folder has no
+/// plugins.
 pub fn present_plugins(game: &GameInstall, mods: &Path) -> Result<Vec<String>, InstallError> {
-    let mut names = match plugins_in(mods) {
-        Ok(n) => n,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(InstallError::Io(mods.to_path_buf(), e)),
-    };
+    let mut names = mod_plugins(mods).map_err(|e| InstallError::Io(mods.to_path_buf(), e))?;
     for d in plugins_in(&game.data).map_err(|e| InstallError::Io(game.data.clone(), e))? {
         if !names.iter().any(|n| n.eq_ignore_ascii_case(&d)) {
             names.push(d);
@@ -168,10 +196,11 @@ pub fn present_plugins(game: &GameInstall, mods: &Path) -> Result<Vec<String>, I
     Ok(names)
 }
 
-/// The file to open for plugin `name`: the mods folder's copy when `mods` has one (any
-/// case), else `Data`'s (any case), else `data/name`.
+/// The file to open for plugin `name`: the highest-precedence copy in the mods layer `mods`
+/// ([`crate::mods::resolve`], any case), else `Data`'s (any case), else `data/name`. A
+/// name with a path in it (`--plugins /a/b/C.esp`) is used as it is.
 pub fn plugin_path(data: &Path, mods: Option<&Path>, name: &str) -> PathBuf {
-    mods.and_then(|m| child_ci(m, name)).or_else(|| child_ci(data, name)).unwrap_or_else(|| data.join(name))
+    mods.and_then(|m| crate::mods::resolve(m, name)).or_else(|| child_ci(data, name)).unwrap_or_else(|| data.join(name))
 }
 
 /// [`plugin_path`] over the mods folders `roots`, highest precedence first (issue #1526:
@@ -309,7 +338,7 @@ pub fn sync(home: &EngineHome, game: &GameInstall) -> Result<PluginSync, Install
         crate::write_whole(&path, list.to_text().as_bytes())?;
     }
     let (load, missing, base_forced) = list.load_order(&present);
-    let from_mods = load.iter().filter(|n| child_ci(&mods, n).is_some()).cloned().collect();
+    let from_mods = load.iter().filter(|n| crate::mods::exists(&mods, n)).cloned().collect();
     Ok(PluginSync { load, from_mods, added, missing, base_forced, written })
 }
 
@@ -463,6 +492,72 @@ Edits.esp
         assert!(p.file_name().unwrap().to_string_lossy().eq_ignore_ascii_case("mod.esp"));
         assert_eq!(plugin_path(&data, Some(&home.mods()), "FalloutNV.esm"), data.join("FalloutNV.esm"));
         assert_eq!(plugin_path(&data, None, "Mod.esp"), data.join("Mod.esp"));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// The overlay's shape: ONE FOLDER PER MOD. A plugin in `mods/Alpha/A.esp` is present
+    /// (once, though `Data` has a copy) and is the one opened, in any case.
+    #[test]
+    fn a_plugin_in_a_mod_folder_is_found_once_and_opened() {
+        let t = std::env::temp_dir().join(format!("nvf-plugins-per-mod-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let data = t.join("game").join("Data");
+        std::fs::create_dir_all(&data).unwrap();
+        for f in ["FalloutNV.esm", "a.esp", "OnlyData.esp"] {
+            std::fs::write(data.join(f), b"TES4").unwrap();
+        }
+        let game = GameInstall::open(t.join("game")).unwrap();
+        let home = EngineHome::new(t.join("home"));
+        let alpha = home.mods().join("Alpha");
+        std::fs::create_dir_all(&alpha).unwrap();
+        // `Data` has `a.esp`; the mod's folder has `A.ESP` and another plugin.
+        for f in ["A.ESP", "B.ESP"] {
+            std::fs::write(alpha.join(f), b"TES4").unwrap();
+        }
+        // Listed once, as the mod folder spells it, beside Data's other plugins.
+        assert_eq!(present_plugins(&game, &home.mods()).unwrap(), names(&["FalloutNV.esm", "A.ESP", "B.ESP", "OnlyData.esp"]));
+        // Opened from the mod folder whatever the case asked for (Data's copy loses).
+        // A case-insensitive file system answers the exact name too, so the file name may
+        // come back in the asked-for case; the folder is what proves which copy won.
+        let p = plugin_path(&data, Some(&home.mods()), "a.esp");
+        assert_eq!(p.parent(), Some(alpha.as_path()));
+        assert!(p.file_name().unwrap().to_string_lossy().eq_ignore_ascii_case("a.esp"));
+        assert_eq!(plugin_path(&data, Some(&home.mods()), "b.esp").parent(), Some(alpha.as_path()));
+        assert!(plugin_path(&data, Some(&home.mods()), "b.esp").file_name().unwrap().to_string_lossy().eq_ignore_ascii_case("b.esp"));
+        assert_eq!(plugin_path(&data, Some(&home.mods()), "OnlyData.esp"), data.join("OnlyData.esp"));
+        // The list gets a line for it and loads it when turned on.
+        let s = sync(&home, &game).unwrap();
+        assert_eq!(s.added, names(&["FalloutNV.esm", "A.ESP", "B.ESP", "OnlyData.esp"]));
+        std::fs::write(home.plugins_file(), "*FalloutNV.esm\n*A.ESP\n*B.ESP\n").unwrap();
+        let s = sync(&home, &game).unwrap();
+        assert_eq!(s.load, names(&["FalloutNV.esm", "A.ESP", "B.ESP"]));
+        assert_eq!(s.from_mods, names(&["A.ESP", "B.ESP"]));
+        assert!(s.missing.is_empty());
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// Two mods shipping one plugin name: `mods.txt`'s top line wins, and a named mod beats
+    /// a mod the file does not name.
+    #[test]
+    fn the_higher_mod_wins_a_plugin_of_the_same_name() {
+        let t = std::env::temp_dir().join(format!("nvf-plugins-precedence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let data = t.join("game").join("Data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("FalloutNV.esm"), b"TES4").unwrap();
+        let game = GameInstall::open(t.join("game")).unwrap();
+        let home = EngineHome::new(t.join("home"));
+        for name in ["Alpha", "Bravo", "Zulu"] {
+            let dir = home.mods().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Shared.esp"), b"TES4").unwrap();
+        }
+        std::fs::write(home.mods().join("mods.txt"), "# top wins\nAlpha\nBravo\n").unwrap();
+        assert_eq!(plugin_path(&data, Some(&home.mods()), "Shared.esp"), home.mods().join("Alpha").join("Shared.esp"));
+        assert_eq!(present_plugins(&game, &home.mods()).unwrap(), names(&["FalloutNV.esm", "Shared.esp"]));
+        // Without mods.txt the name order decides (the last folder wins).
+        std::fs::remove_file(home.mods().join("mods.txt")).unwrap();
+        assert_eq!(plugin_path(&data, Some(&home.mods()), "Shared.esp"), home.mods().join("Zulu").join("Shared.esp"));
         std::fs::remove_dir_all(&t).ok();
     }
 }
