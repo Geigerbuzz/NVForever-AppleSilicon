@@ -40,10 +40,11 @@ impl<'a> LoadOrderIndex<'a> {
         let n = lo.plugins.len();
         // The game's own master is loaded in every game: a plugin whose header lists no
         // masters (Helmet Overlay.esm 1.03 has none) still writes forms of FalloutNV.esm
-        // in its source, and the original's compiler resolved them [observed: Helmet
-        // Overlay.esm SCPT 0x5F000816's `float fHour = GameHour` — GameHour is GLOB
-        // 0x00000038 of FalloutNV.esm, and the shipped bytes name ref slot 0x38; the
-        // plugin's missing master is a defect of the mod, not of the name].
+        // in its source, and the original's compiler took the name — it wrote the FormID
+        // with the plugin's own index (`0x5F000038`), a dangling form, so the header is a
+        // defect of the mod while the name is real. The game always has FalloutNV.esm's
+        // forms, so its names resolve here [observed: Helmet Overlay.esm SCPT
+        // 0x5F000816's `float fHour = GameHour`; GameHour is GLOB 0x00000038].
         let base = lo.plugins.iter().position(|p| p.name.eq_ignore_ascii_case("FalloutNV.esm"));
         let visible = (0..n)
             .map(|i| {
