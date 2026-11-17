@@ -7,9 +7,9 @@ license.workspace = true
 
 [dependencies]
 fnv-bsa = { path = "../fnv-bsa" }
+# The mods layer's layout and precedence (one folder per mod, `mods.txt`), shared with the
+# plugin list and the mod-files roots: one order, not two.
+fnv-install = { path = "../fnv-install" }
 thiserror.workspace = true
 tracing = "0.1"
 
-[dev-dependencies]
-# The required-files list of the install check must cover what the VFS loads.
-fnv-install = { path = "../fnv-install" }

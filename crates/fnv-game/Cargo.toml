@@ -114,3 +114,9 @@ path = "tests/jip_registration_provenance.rs"
 [[test]]
 name = "get_files_data_roots"
 path = "tests/get_files_data_roots.rs"
+
+# A mod's own folder is a read root (Config, Script Runner): its own binary, since Roots is
+# process-wide.
+[[test]]
+name = "mod_files_mod_roots"
+path = "tests/mod_files_mod_roots.rs"
