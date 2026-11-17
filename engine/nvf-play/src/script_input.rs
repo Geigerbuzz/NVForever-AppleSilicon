@@ -317,16 +317,23 @@ fn tell_player_state(
 
 /// Once the game's Data is open: mods' files are read from NVForever's mods layer, then
 /// the game's Data, and the archives answer FileExists (fnv_game::mod_files).
+///
+/// The mods layer holds one folder per mod, each an overlay root ([`fnv_install::mods`]):
+/// `read` is one root per mod in `mods.txt` precedence (the highest first, then the mods
+/// folder itself), so `Config\B42Inertia.ini` is `mods\B42Inertia\Config\B42Inertia.ini`,
+/// not `mods\Config\B42Inertia.ini` — the parent alone reached no mod's config, Script
+/// Runner listing or AnimGroupOverride JSON. Data comes last, as `data_dir()` expects.
 fn mod_file_roots(data: Option<Res<nvf_assets::GameData>>, mut done: Local<bool>) {
     let Some(d) = data.filter(|_| !*done) else { return };
     *done = true;
     let vfs = d.vfs.clone();
     let reader_vfs = d.vfs.clone();
-    let mods = fnv_install::EngineHome::default_root().map(|r| fnv_install::EngineHome::new(r).mods());
+    let mut read = fnv_install::EngineHome::default_root().map(|r| fnv_install::mods::read_roots(&fnv_install::EngineHome::new(r).mods())).unwrap_or_default();
     let data_dir = vfs.data_dir().to_path_buf();
+    read.push(data_dir);
     let archives: Vec<String> = vfs.archives().map(str::to_string).collect();
     fnv_game::mod_files::update_roots(move |r| {
-        r.read = mods.into_iter().chain(std::iter::once(data_dir)).collect();
+        r.read = read;
         r.archives = archives;
         r.reader = Some(std::sync::Arc::new(move |p: &str| reader_vfs.read(p).and_then(Result::ok)));
         r.lookup = Some(std::sync::Arc::new(move |p: &str| {

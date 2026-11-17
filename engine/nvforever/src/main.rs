@@ -1169,20 +1169,26 @@ fn main() -> AppExit {
                 return AppExit::error();
             }
         }
-    } else if default_plugins && !developer_data {
-        match setup::plugin_list(&install) {
-            Ok(p) => args.plugins = p,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return AppExit::error();
-            }
-        }
     } else if default_plugins {
-        // Without --plugins: the DLC masters that are there (all of them are optional).
-        let addons = install.addon_masters();
-        args.plugins.retain(|p| p == MASTERS[0] || addons.contains(&p.as_str()));
-        if addons.len() < MASTERS.len() - 1 {
-            eprintln!("setup: playing without the add-ons not installed; masters: {}", args.plugins.join(", "));
+        // No --plugins: the home's own plugins.txt decides what loads, whether or not
+        // --data named the game: pointing at the game folder is still a player's start, and
+        // the mods layer's plugins are only found there (fnv_install::plugins). A harness
+        // that wants the fixed masters passes --plugins. Without a home there is no list,
+        // so the DLC masters that are there load (all of them are optional).
+        if fnv_install::EngineHome::user().is_some() {
+            match setup::plugin_list(&install) {
+                Ok(p) => args.plugins = p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return AppExit::error();
+                }
+            }
+        } else {
+            let addons = install.addon_masters();
+            args.plugins.retain(|p| p == MASTERS[0] || addons.contains(&p.as_str()));
+            if addons.len() < MASTERS.len() - 1 {
+                eprintln!("setup: playing without the add-ons not installed; masters: {}", args.plugins.join(", "));
+            }
         }
     }
     // The run log and crash reports in NVForever's home (crash.rs).
