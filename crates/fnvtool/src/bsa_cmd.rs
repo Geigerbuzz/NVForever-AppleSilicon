@@ -52,16 +52,21 @@ fn trailer_warning(path: &str, t: Trailer) -> Option<(String, String)> {
 /// `fnvtool vfs …`.
 pub fn run_vfs(cmd: crate::VfsCmd) -> anyhow::Result<Value> {
     match cmd {
-        crate::VfsCmd::Order { data_dir, plugins, archive_list } => {
+        crate::VfsCmd::Order { data_dir, plugins, archive_list, mods } => {
             let plugins: Vec<String> = if plugins.is_empty() { fnv_vfs::DEFAULT_PLUGINS.iter().map(|p| p.to_string()).collect() } else { plugins };
             if let Some(l) = archive_list {
                 fnv_vfs::set_archive_list(fnv_vfs::parse_archive_list(&l)).map_err(|_| anyhow::anyhow!("--archive-list: no archive named"))?;
             }
-            let (archives, from_env) = fnv_vfs::Vfs::order_for_plugins(&data_dir, &plugins);
+            let (archives, from_env) = match &mods {
+                Some(m) => (fnv_vfs::Vfs::order_for_plugins_in(&data_dir, Some(m), &plugins).0, false),
+                None => fnv_vfs::Vfs::order_for_plugins(&data_dir, &plugins),
+            };
             let source = if from_env {
                 fnv_vfs::ARCHIVE_ORDER_ENV
             } else if fnv_vfs::archive_list_overridden() {
                 "SArchiveList given, Update.bsa, then each plugin's archives"
+            } else if mods.is_some() {
+                "SArchiveList default, Update.bsa, then each plugin's archives, the mods layer's copy winning"
             } else {
                 "SArchiveList default, Update.bsa, then each plugin's archives"
             };
@@ -69,6 +74,7 @@ pub fn run_vfs(cmd: crate::VfsCmd) -> anyhow::Result<Value> {
                 "schema": "fnv.vfs.order/1",
                 "data": data_dir.display().to_string(),
                 "plugins": plugins,
+                "mods": mods.map(|m| m.display().to_string()),
                 "source": source,
                 "archives": archives,
                 "loose": "above every archive",
