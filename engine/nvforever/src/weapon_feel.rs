@@ -141,7 +141,7 @@ pub struct WeaponFeel {
 /// The first of `candidates` the overlay has, as the file's text (its key is for the log).
 fn read_first(vfs: &fnv_vfs::Vfs, candidates: &[&str]) -> Option<(String, String)> {
     for rel in candidates {
-        if let Ok(Some(bytes)) = vfs.read(rel) {
+        if let Some(Ok(bytes)) = vfs.read(rel) {
             return Some((fnv_vfs::normalize(rel), String::from_utf8_lossy(&bytes).into_owned()));
         }
     }
@@ -222,7 +222,7 @@ impl WeaponFeel {
                 continue;
             }
             files += 1;
-            let Ok(Some(bytes)) = vfs.read(&key) else { continue };
+            let Some(Ok(bytes)) = vfs.read(&key) else { continue };
             if let Some(p) = pattern::parse_pattern(&String::from_utf8_lossy(&bytes)) {
                 profile.patterns.insert(edid.to_ascii_lowercase(), p);
                 read += 1;
@@ -349,8 +349,8 @@ fn apply(feel: Res<WeaponFeel>, combat: Option<ResMut<nvf_play::combat::Combat>>
 mod tests {
     use super::*;
 
-    /// A fresh overlay for one test, written like a mod folder's contents (the VFS indexes
-    /// the directory itself, so `Config/B42Inertia.ini` is the mod-relative `config\…`).
+    /// A fresh overlay for one test: one overlay root, as `Vfs::open` indexes it, holding
+    /// the mod-relative paths themselves (`Config/B42Inertia.ini` → `config\b42inertia.ini`).
     fn overlay(name: &str, files: &[(&str, &str)]) -> fnv_vfs::Vfs {
         let dir = std::env::temp_dir().join(format!("nvf-weapon-feel-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn b42_inertia_maps_its_numbers_onto_the_sway() {
-        let vfs = overlay("b42", &[("B42Inertia/Config/B42Inertia.ini", B42)]);
+        let vfs = overlay("b42", &[("Config/B42Inertia.ini", B42)]);
         let feel = WeaponFeel::load(&vfs, true);
         assert!((feel.sway.intensity_v - 0.6).abs() < 1e-6);
         assert!((feel.sway.intensity_h - 0.4).abs() < 1e-6);
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn b42_rates_change_the_time_constants_and_defaults_stand_when_absent() {
-        let vfs = overlay("b42rates", &[("Mod/Config/B42Inertia.ini", "[Tuning]\nfSpeedMult=10\nfCenteringSpeed=2\n")]);
+        let vfs = overlay("b42rates", &[("Config/B42Inertia.ini", "[Tuning]\nfSpeedMult=10\nfCenteringSpeed=2\n")]);
         let feel = WeaponFeel::load(&vfs, true);
         assert!((feel.sway.turn_chase - SwayTuning::default().turn_chase / 2.0).abs() < 1e-6);
         assert!((feel.sway.rest_chase - SwayTuning::default().rest_chase / 2.0).abs() < 1e-6);
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn a_bad_value_leaves_the_engines_constant_and_says_so() {
-        let vfs = overlay("b42bad", &[("Mod/Config/B42Inertia.ini", "[Tuning]\nfIntensityMultVertical=-3\nfIntensityMultHorizontal=nonsense\nfSpeedMult=0\n")]);
+        let vfs = overlay("b42bad", &[("Config/B42Inertia.ini", "[Tuning]\nfIntensityMultVertical=-3\nfIntensityMultHorizontal=nonsense\nfSpeedMult=0\n")]);
         let feel = WeaponFeel::load(&vfs, true);
         assert_eq!(feel.sway, SwayTuning::default(), "a negative intensity, an unreadable one and a zero rate are all refused");
         assert!(feel.report.iter().any(|l| l.contains("fIntensityMultHorizontal missing")), "{:?}", feel.report);
@@ -413,10 +413,10 @@ mod tests {
         let vfs = overlay(
             "recoil",
             &[
-                ("ViewmodelRecoil/Config/ProfilesVRecoil/Default.ini", "[General]\nvVerticalIntensity=0.4\n[Individual]\nvUseIndividualRecoil=1\n"),
-                ("ViewmodelRecoil/Config/WeaponVRecoil/Weap10mmPistol.ini", "[PATTERN]\nX=1\nY=2\nZ=-4\ndX=-0.1\ndY=0.9\ndZ=0.9\ncIS=0.5\n"),
-                ("ViewmodelRecoil/Config/WeaponVRecoil/TEMPLATE.ini", "[PATTERN]\nX=-2\nY=3\nZ=1\n"),
-                ("ViewmodelRecoil/Config/WeaponVRecoil/WeapBroken.ini", "[PATTERN]\nY=not-a-number\n"),
+                ("Config/ProfilesVRecoil/Default.ini", "[General]\nvVerticalIntensity=0.4\n[Individual]\nvUseIndividualRecoil=1\n"),
+                ("Config/WeaponVRecoil/Weap10mmPistol.ini", "[PATTERN]\nX=1\nY=2\nZ=-4\ndX=-0.1\ndY=0.9\ndZ=0.9\ncIS=0.5\n"),
+                ("Config/WeaponVRecoil/TEMPLATE.ini", "[PATTERN]\nX=-2\nY=3\nZ=1\n"),
+                ("Config/WeaponVRecoil/WeapBroken.ini", "[PATTERN]\nY=not-a-number\n"),
             ],
         );
         let feel = WeaponFeel::load(&vfs, true);
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn fps_lowering_reads_its_mode_from_the_fomod_layout_the_install_has() {
-        let vfs = overlay("lowering", &[("FPSLowering/[MAIN]/config/FPS WL/FPSWL Config.ini", "[SETTINGS]\niWLKey=21\niWLMode=2\niWLSound=1\n")]);
+        let vfs = overlay("lowering", &[("[MAIN]/config/FPS WL/FPSWL Config.ini", "[SETTINGS]\niWLKey=21\niWLMode=2\niWLSound=1\n")]);
         let feel = WeaponFeel::load(&vfs, true);
         let l = feel.lowering.unwrap();
         assert_eq!(l.mode, LoweringMode::Complex);
@@ -456,14 +456,14 @@ mod tests {
 
     #[test]
     fn a_zero_mode_is_the_hotkey_only() {
-        let vfs = overlay("lowering0", &[("Mod/Config/FPS Weapon Lowering.ini", "[SETTINGS]\niWLMode=0\n")]);
+        let vfs = overlay("lowering0", &[("Config/FPS Weapon Lowering.ini", "[SETTINGS]\niWLMode=0\n")]);
         let feel = WeaponFeel::load(&vfs, true);
         assert_eq!(feel.lowering.unwrap().mode, LoweringMode::Hotkey);
     }
 
     #[test]
     fn a_missing_mode_does_not_invent_automatic_lowering() {
-        let vfs = overlay("loweringmiss", &[("Mod/Config/FPS Weapon Lowering.ini", "[SETTINGS]\niWLKey=21\niWLMode=two\n")]);
+        let vfs = overlay("loweringmiss", &[("Config/FPS Weapon Lowering.ini", "[SETTINGS]\niWLKey=21\niWLMode=two\n")]);
         let feel = WeaponFeel::load(&vfs, true);
         assert_eq!(feel.lowering.unwrap().mode, LoweringMode::Hotkey, "an unreadable mode leaves the weapon up, as before");
     }
@@ -472,7 +472,7 @@ mod tests {
     fn smooth_ironsights_reports_that_no_defaults_ship() {
         let vfs = overlay(
             "smooth",
-            &[("SmoothIronsights/NVSE/Plugins/Tweaks/MenuConfig/SmoothTrueIronsights.json", r#"[{"name":"Smooth","subsettings":[{"internalName":"iAimTransitionTimeMS","minValue":0,"maxValue":500}]}]"#)],
+            &[("NVSE/Plugins/Tweaks/MenuConfig/SmoothTrueIronsights.json", r#"[{"name":"Smooth","subsettings":[{"internalName":"iAimTransitionTimeMS","minValue":0,"maxValue":500}]}]"#)],
         );
         let feel = WeaponFeel::load(&vfs, true);
         let line = feel.report.iter().find(|l| l.starts_with("Smooth True Ironsights")).unwrap();
@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn the_switch_off_changes_nothing_though_the_files_are_read() {
-        let vfs = overlay("off", &[("B42Inertia/Config/B42Inertia.ini", B42)]);
+        let vfs = overlay("off", &[("Config/B42Inertia.ini", B42)]);
         let off = WeaponFeel::load(&vfs, false);
         assert!(!off.enabled);
         assert!((off.sway.intensity_v - 0.6).abs() < 1e-6, "the numbers are still read");
@@ -506,12 +506,12 @@ mod tests {
         // installed mod ships (60), and the lowering INI in the layout the overlay has.
         let pattern = "[PATTERN]\nX=1\nY=2\nZ=-4\ndX=-0.1\ndY=0.9\ndZ=0.9\ncIS=0.5\n";
         let mut files: Vec<(String, &str)> = vec![
-            ("ViewmodelRecoil/Config/ProfilesVRecoil/Default.ini".into(), "[General]\nvVerticalIntensity=0.4\nvHorizontalIntensity=0.01\n"),
-            ("FPSLowering/[MAIN]/config/FPS WL/FPSWL Config.ini".into(), "[SETTINGS]\niWLMode=2\n"),
-            ("B42Inertia/Config/B42Inertia.ini".into(), B42),
+            ("Config/ProfilesVRecoil/Default.ini".into(), "[General]\nvVerticalIntensity=0.4\nvHorizontalIntensity=0.01\n"),
+            ("[MAIN]/config/FPS WL/FPSWL Config.ini".into(), "[SETTINGS]\niWLMode=2\n"),
+            ("Config/B42Inertia.ini".into(), B42),
         ];
         for i in 0..60 {
-            files.push((format!("ViewmodelRecoil/Config/WeaponVRecoil/WeapTest{i}.ini"), pattern));
+            files.push((format!("Config/WeaponVRecoil/WeapTest{i}.ini"), pattern));
         }
         let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), *b)).collect();
         let vfs = overlay("cost", &refs);

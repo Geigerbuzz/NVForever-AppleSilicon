@@ -1045,22 +1045,26 @@ fn main() -> AppExit {
     // also where the writer has none at hand (saves, test aids; #994).
     fnv_install::remember_game(&install);
     let default_plugins = args.plugins.iter().map(String::as_str).eq(MASTERS);
-    // A player's start (no --data, no --plugins): the home's own plugins.txt (setup.rs).
-    // Developer and smoke runs keep the fixed masters below, whatever the list says.
-    if default_plugins && !developer_data {
-        match setup::plugin_list(&install) {
-            Ok(p) => args.plugins = p,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return AppExit::error();
+    // No --plugins: the home's own plugins.txt decides what loads, whether or not --data
+    // named the game — pointing at the game folder is still a player's start, and the mods
+    // layer's plugins are only found there (fnv_install::plugins). A harness that wants the
+    // fixed masters passes --plugins. Without a home there is no list, so the DLC masters
+    // that are there load (all of them are optional).
+    if default_plugins {
+        if fnv_install::EngineHome::user().is_some() {
+            match setup::plugin_list(&install) {
+                Ok(p) => args.plugins = p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return AppExit::error();
+                }
             }
-        }
-    } else if default_plugins {
-        // Without --plugins: the DLC masters that are there (all of them are optional).
-        let addons = install.addon_masters();
-        args.plugins.retain(|p| p == MASTERS[0] || addons.contains(&p.as_str()));
-        if addons.len() < MASTERS.len() - 1 {
-            eprintln!("setup: playing without the add-ons not installed; masters: {}", args.plugins.join(", "));
+        } else {
+            let addons = install.addon_masters();
+            args.plugins.retain(|p| p == MASTERS[0] || addons.contains(&p.as_str()));
+            if addons.len() < MASTERS.len() - 1 {
+                eprintln!("setup: playing without the add-ons not installed; masters: {}", args.plugins.join(", "));
+            }
         }
     }
     // The run log and crash reports in NVForever's home (crash.rs).
