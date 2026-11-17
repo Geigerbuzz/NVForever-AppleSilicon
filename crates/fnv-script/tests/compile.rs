@@ -1830,6 +1830,15 @@ end");
 }
 
 #[test]
+fn a_string_keeps_the_line_break_it_holds() {
+    // [observed: Animated Ingestibles.esp's MCM SetUIString, whose compiled string length
+    // (0xE8) counts the CRLF the source holds.] The vanilla path encodes the string with
+    // the break, not ending the statement at it.
+    let (c, _) = mod_ok("begin GameMode\nPlayBink \"a\r\nb\" 0\nend");
+    assert!(c.bytes.windows(6).any(|w| w == b"\x04\x00a\r\nb"), "{:?}", c.bytes);
+}
+
+#[test]
 fn a_brace_group_is_the_calls_argument_list() {
     // [observed: SD_Fatigue.esp 1.0, `rActor.call SDFnKarmaLoss {rActor, -15}` with its
     // two parameters filled, `call SDFnUpdateWeaponList {}` with none, and
