@@ -3022,6 +3022,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
@@ -3132,6 +3133,7 @@ name = "fnv-vfs"
 version = "0.7.0"
 dependencies = [
  "fnv-bsa",
+ "fnv-install",
  "thiserror 2.0.21",
  "tracing",
 ]
