@@ -365,6 +365,46 @@ impl Vfs {
                     })
                     .unwrap_or_default();
                 payloads.sort();
+                // An explicit precedence replaces the alphabetical default: `mods/mods.txt`,
+                // one folder per line, TOP WINS. Named folders are indexed last-to-first so
+                // the first line is inserted last (highest precedence); a folder not named
+                // there is indexed below every named one, in name order. So a freshly
+                // installed mod lands at the BOTTOM and cannot silently outrank a curated
+                // order — the failure that made MUVAT 2K override 40 clothing textures and
+                // an old Pip-Boy icon pack hide all five v5 packs.
+                if let Ok(text) = std::fs::read_to_string(root.join("mods.txt")) {
+                    let mut named: Vec<String> = Vec::new();
+                    for line in text.lines() {
+                        let l = line.trim();
+                        if l.is_empty() || l.starts_with('#') {
+                            continue;
+                        }
+                        let l = l.trim_start_matches(['*', '!', '+', ' ']);
+                        if !l.is_empty() {
+                            named.push(l.to_string());
+                        }
+                    }
+                    let find = |name: &str| {
+                        payloads
+                            .iter()
+                            .find(|p| p.file_name().and_then(|s| s.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(name)))
+                            .cloned()
+                    };
+                    let mut order: Vec<PathBuf> = Vec::new();
+                    for p in &payloads {
+                        let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                        if !named.iter().any(|x| x.eq_ignore_ascii_case(n)) {
+                            order.push(p.clone());
+                        }
+                    }
+                    for name in named.iter().rev() {
+                        match find(name) {
+                            Some(p) => order.push(p),
+                            None => tracing::warn!(mods_txt = %name, "mods.txt names a folder that is not installed"),
+                        }
+                    }
+                    payloads = order;
+                }
                 for payload in &payloads {
                     vfs.index_loose(payload);
                 }
