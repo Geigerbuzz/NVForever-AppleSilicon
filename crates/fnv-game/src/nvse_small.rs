@@ -669,8 +669,9 @@ pub(crate) fn call(g: &mut Game, ctx: &RunCtx, name: &str, subject: Option<FormI
         // `ySIGetTagTrait "filename" rItem`]. "string" is the tag itself and "filename"
         // the icon texture ySI gives that tag; ySI's own json also has "template" and
         // "category" per tag, which this engine does not read, so they and anything else
-        // read "". With ySI absent no form has a tag, so every read is "" and JLM hides
-        // its ySI icon rather than showing a wrong one [decision: ySI is not installed].
+        // read "". With ySI absent nothing assigns a tag unless a mod calls ySISetTrait,
+        // so JAM's reads are "" and JLM hides its ySI icon rather than showing a wrong
+        // one [decision: ySI is not installed].
         "ysigettagtrait" => {
             let f = form(args, 1).or(subject).map(|f| crate::functions::base_of(g, f).unwrap_or(f));
             let Some(f) = f else { return Some(Ok(XVal::Str(String::new()))) };
