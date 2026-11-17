@@ -54,6 +54,7 @@ pub mod item_mod_menu;
 pub mod layout;
 pub mod list;
 pub mod map_menu;
+pub mod mcm;
 pub mod menus;
 pub mod model;
 pub mod mods;
@@ -1025,6 +1026,7 @@ impl Plugin for TilesPlugin {
         // hidden after every drawing system, before visibility is passed down [design].
         vanilla::setup(app);
         input::setup(app);
+        mcm::setup(app);
         stats_menu::setup(app);
         inventory_menu::setup(app);
         map_menu::setup(app);

@@ -426,6 +426,18 @@ impl ModFiles {
         true
     }
 
+    /// Keep a file's text for this session's readers ([`ModFiles::read`]) when it was
+    /// written outside the layer [`Roots::write`] names: the MCM menu store writes a mod's
+    /// own `Config` file inside its folder in the mods layer, and `GetModINI` must see the
+    /// new value in the same frame (`crate::mcm::set_value`). The ShowOff cache of the file
+    /// is dropped, or a script that read it with `GetINIFloat_Cached` would keep the old
+    /// number.
+    pub fn keep_written(&mut self, rel: &str, text: String) {
+        let key = norm(rel);
+        self.cache.remove(&key);
+        self.written.insert(key, text);
+    }
+
     /// [`ModFiles::read_root`] for the other files of the crate.
     pub(crate) fn read_root_text(&self, rel: &str) -> Option<String> {
         self.read_root(rel)
@@ -582,7 +594,7 @@ fn ini_sections(text: &str) -> Vec<String> {
 /// Set a key in INI text: rewritten in place, else added at the end of its section,
 /// else a new section at the end; lines end in CRLF [observed: "fSet=2.25" appended at
 /// the end of [General], "fNum=6" rewritten in place, a new file "[New]\r\nfVal=1.5\r\n"].
-fn ini_set(text: &str, section: &str, key: &str, value: &str, section_name: &str, key_name: &str) -> String {
+pub(crate) fn ini_set(text: &str, section: &str, key: &str, value: &str, section_name: &str, key_name: &str) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let mut cur = String::new();
     let mut last_in_section: Option<usize> = None;

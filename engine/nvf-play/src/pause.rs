@@ -567,6 +567,9 @@ pub enum Page {
     /// The Mods page: a mod's page of `StartMenu` drawn from its tiles (MCM's), with the
     /// start menu's MenuMode scripts running (issue #976, T11; [`ModsEntry`]).
     Mods,
+    /// The native MCM page: the mods' `MCM/*.json` menus as rows, drawn over this menu
+    /// (`crate::tiles::mcm`, [`McmEntry`]).
+    Mcms,
 }
 
 impl Page {
@@ -574,7 +577,7 @@ impl Page {
     /// [`RowId::sound_id`], [`NO_ROW_SOUND`] on an empty tab).
     pub(crate) fn settings_row(self) -> Option<usize> {
         match self {
-            Page::Main | Page::Load { .. } | Page::Mods => None,
+            Page::Main | Page::Load { .. } | Page::Mods | Page::Mcms => None,
             Page::Settings { selected } => Some(selected.map_or(NO_ROW_SOUND, RowId::sound_id)),
         }
     }
@@ -587,6 +590,7 @@ impl Page {
             Page::Settings { .. } => label.starts_with("Settings"),
             Page::Load { .. } => label.starts_with("Load"),
             Page::Mods => label.starts_with(MODS_LABEL),
+            Page::Mcms => label.starts_with(crate::tiles::mcm::LABEL),
         }
     }
 }
@@ -603,6 +607,9 @@ pub struct Listening(pub Option<(crate::bindings::Control, crate::bindings::Inpu
 /// added one"; ui-tile-tree.md §7]. Written by `crate::tiles` each frame.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModsEntry(pub bool);
+
+/// Whether the pause column has the native MCM page (`crate::tiles::mcm::McmEntry`).
+pub use crate::tiles::mcm::McmEntry;
 
 /// Whether the Mods page is up: the pause menu open on [`Page::Mods`].
 pub fn mods_open(paused: &Paused, page: &Page) -> bool {
@@ -803,15 +810,21 @@ enum Entry {
     Console,
     /// Only with [`ModsEntry`], before Quit [design].
     Mods,
+    /// Only with [`McmEntry`], before Quit: the mods' own JSON menus
+    /// (`crate::tiles::mcm`).
+    Mcms,
     Quit,
 }
 
 /// The column's entries, with the Console entry when `console` (the tweak) and the Mods
 /// entry when `mods` ([`ModsEntry`]).
-fn entries(mods: bool, console: bool) -> Vec<Entry> {
+fn entries(mods: bool, mcm: bool, console: bool) -> Vec<Entry> {
     let mut v = vec![Entry::Continue, Entry::Save, Entry::Load, Entry::Settings];
     if console {
         v.push(Entry::Console);
+    }
+    if mcm {
+        v.push(Entry::Mcms);
     }
     if mods {
         v.push(Entry::Mods);
@@ -829,6 +842,7 @@ impl Entry {
             Entry::Settings => "Settings",
             Entry::Console => CONSOLE_LABEL,
             Entry::Mods => MODS_LABEL,
+            Entry::Mcms => crate::tiles::mcm::LABEL,
             Entry::Quit => "Quit",
         }
     }
@@ -1315,6 +1329,7 @@ impl Drawn {
             Page::Settings { .. } => find("Settings"),
             Page::Load { .. } => find("Load"),
             Page::Mods => find(MODS_LABEL),
+            Page::Mcms => find(crate::tiles::mcm::LABEL),
         }
     }
 }
@@ -1582,8 +1597,9 @@ fn spawn_page(commands: &mut Commands, d: &Drawn, look: &PauseLook, settings: &[
                     band(root, look, tall(Node { top: u(0.0), height: Val::Percent(100.0), ..from_middle(band_left, 0.0, band_w, 0.0) }))
                 }
                 Page::Load { .. } => band(root, look, tall(Node { height: Val::Percent(100.0), ..from_right(RIGHT + COLUMN, 0.0, LOAD_WIDTH + BAND_MARGIN, 0.0) })),
-                // The mod's page is drawn from its tiles over this one (`crate::tiles::draw`).
-                Page::Main | Page::Mods => {}
+                // The mod's page is drawn from its tiles over this one (`crate::tiles::draw`),
+                // the native MCM page by its own module (`crate::tiles::mcm`).
+                Page::Main | Page::Mods | Page::Mcms => {}
             }
             // The column: the keys' list on the first page, else half bright but for the page's entry.
             let top = (960.0 - d.column.len() as f32 * ITEM) / 2.0;
@@ -1616,10 +1632,10 @@ fn spawn_page(commands: &mut Commands, d: &Drawn, look: &PauseLook, settings: &[
                 }
                 Page::Settings { selected } => settings_page(root, d, look, settings, selected, lb, glyphs),
                 Page::Load { selected } => load_page(root, d, look, list, selected, glyphs),
-                Page::Mods => {}
+                Page::Mods | Page::Mcms => {}
             }
             // Back (and Defaults) at the bottom right.
-            if d.page != Page::Main && !d.mod_window {
+            if d.page != Page::Main && !d.mod_window && d.page != Page::Mcms {
                 let on = |item| matches!(d.page, Page::Settings { .. }) && d.focus == SettingsFocus::Rail(item);
                 right_entry(root, &f.entry, &back_label(), from_right(RIGHT, BACK_TOP, 200.0, ITEM), 200.0, Shade::Bright, on(RailItem::Back), PauseButton::Back, glyphs);
                 if matches!(d.page, Page::Settings { .. }) {
@@ -3053,12 +3069,13 @@ fn choose(
         Option<ResMut<PauseInputAid>>,
         Option<ResMut<crate::tiles::mods::ModsPage>>,
     ),
-    (bindings, pads, sticks, pending, mods, mut listening, mut layout, colours): (
+    (bindings, pads, sticks, pending, mods, mcm_entry, mut listening, mut layout, colours): (
         Option<Res<crate::bindings::Bindings>>,
         crate::pad::ActionPads,
         Option<Res<crate::pad::StickButtons>>,
         Option<Res<crate::settings::PendingKeep>>,
         Option<Res<ModsEntry>>,
+        Option<Res<McmEntry>>,
         ResMut<Listening>,
         ResMut<SettingsLayout>,
         Option<Res<crate::ui_colour::CustomColours>>,
@@ -3084,10 +3101,16 @@ fn choose(
     // pages come from here, and going back shows it again.
     let under_main = main_menu.as_ref().is_some_and(|m| m.open);
     let mods = mods.is_some_and(|m| m.0);
-    let entries = entries(mods, console_entry);
+    let mcm = mcm_entry.is_some_and(|m| m.0);
+    let entries = entries(mods, mcm, console_entry);
     // The Mods page goes when its entry does (the mod's tiles were unloaded).
     if *page == Page::Mods && !mods {
         info!("pause menu: no mod page any more, back to the column");
+        *page = Page::Main;
+    }
+    // The native MCM page likewise (the switch was turned off in the settings).
+    if *page == Page::Mcms && !mcm {
+        info!("pause menu: no MCM page any more, back to the column");
         *page = Page::Main;
     }
     // The tab kept in the INI, among the tabs there are now.
@@ -3343,6 +3366,7 @@ fn choose(
                 Page::Settings { .. } => "settings",
                 Page::Load { .. } => "load",
                 Page::Mods => "mods",
+                Page::Mcms => "mcm",
             });
             info!("pause menu: screenshot {name}");
             commands.spawn(bevy::render::view::screenshot::Screenshot::primary_window()).observe(bevy::render::view::screenshot::save_to_disk(name));
@@ -3753,6 +3777,8 @@ fn choose(
                 take = Some(Entry::Settings);
             } else if act("mods") && mods {
                 take = Some(Entry::Mods);
+            } else if act("mcm") && mcm {
+                take = Some(Entry::Mcms);
             } else if keys.just_pressed(KeyCode::Escape) {
                 take = Some(Entry::Continue);
             }
@@ -3800,6 +3826,14 @@ fn choose(
                         *m = Default::default();
                     }
                     *page = Page::Mods;
+                }
+                Some(Entry::Mcms) => {
+                    info!("pause menu: mod settings (MCM menus)");
+                    commands.queue(|w: &mut World| {
+                        let st = w.get_resource::<crate::tiles::mcm::McmMenus>().map(crate::tiles::mcm::open).unwrap_or_default();
+                        w.insert_resource(st);
+                    });
+                    *page = Page::Mcms;
                 }
                 Some(Entry::Console) => {
                     info!("pause menu: console (tweak)");
@@ -4093,6 +4127,32 @@ fn choose(
                 *page = Page::Main;
             }
         }
+        // The native MCM page: its own module works the rows out of the keys and the
+        // clicks, so every action goes to the world as one queue entry.
+        Page::Mcms => {
+            use crate::tiles::mcm::Action;
+            let mut acts: Vec<Action> = Vec::new();
+            if keys.any_just_pressed([KeyCode::Escape, KeyCode::Backspace]) || clicked == Some(PauseButton::Back) || act("back") {
+                acts.push(Action::Back);
+            } else if keys.any_just_pressed([KeyCode::ArrowUp, KeyCode::KeyW]) || act("up") {
+                acts.push(Action::Up);
+            } else if keys.any_just_pressed([KeyCode::ArrowDown, KeyCode::KeyS]) || act("down") {
+                acts.push(Action::Down);
+            } else if keys.any_just_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]) || act("left") || act("wheel-up") {
+                acts.push(Action::Left);
+            } else if keys.any_just_pressed([KeyCode::ArrowRight, KeyCode::KeyD]) || act("right") || act("wheel-down") {
+                acts.push(Action::Right);
+            } else if keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Space]) || act("pick") {
+                acts.push(Action::Take);
+            } else if keys.just_pressed(KeyCode::Tab) {
+                acts.push(Action::NextPage(if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) { -1 } else { 1 }));
+            } else if keys.just_pressed(KeyCode::F1) {
+                acts.push(Action::NextPage(-1));
+            }
+            for a in acts {
+                commands.queue(move |w: &mut World| crate::tiles::mcm::key(w, a));
+            }
+        }
         Page::Load { selected } if view.delete_ask.is_some() => {
             // The delete question has the keys (module notes).
             let yes = keys.any_just_pressed([KeyCode::KeyY, KeyCode::Enter, KeyCode::NumpadEnter]) || clicked == Some(PauseButton::DeleteAnswer(true)) || act("yes");
@@ -4158,7 +4218,7 @@ fn choose(
             view.scroll = crate::menu::model::keep_in_view(view.scroll, selected, menu.list.saves.len(), LOAD_ROWS);
             None
         }
-        Page::Main | Page::Mods => None,
+        Page::Main | Page::Mods | Page::Mcms => None,
     };
     if let Some((n, w)) = window.filter(|w| w.0 > 0) {
         use bevy::input::mouse::MouseScrollUnit;
@@ -4201,7 +4261,7 @@ fn choose(
             }
             Page::Load { selected } if scrolled => *selected = (*selected).clamp(first, (first + w.shown).min(n) - 1),
             Page::Load { selected } => first = crate::menu::model::keep_in_view(first, *selected, n, w.shown),
-            Page::Main | Page::Mods => {}
+            Page::Main | Page::Mods | Page::Mcms => {}
         }
         if first != view.scroll {
             info!("pause menu: rows {}-{} of {} shown", first + 1, (first + w.shown).min(n), n);
@@ -4495,7 +4555,7 @@ fn drawn_now(world: &mut World) -> Drawn {
         status: world.resource::<PauseStatus>().line.clone(),
         under_main: main.is_some(),
         mod_window: page == Page::Mods && world.get_resource::<crate::tiles::mods::ModsPage>().is_some_and(|m| m.mcm_open),
-        column: main.unwrap_or_else(|| entries(world.get_resource::<ModsEntry>().is_some_and(|m| m.0), world.get_resource::<crate::tweaks::TweakSettings>().is_some_and(|t| t.help_is_console)).iter().map(|e| (e.label(), true)).collect()),
+        column: main.unwrap_or_else(|| entries(world.get_resource::<ModsEntry>().is_some_and(|m| m.0), world.get_resource::<McmEntry>().is_some_and(|m| m.0), world.get_resource::<crate::tweaks::TweakSettings>().is_some_and(|t| t.help_is_console)).iter().map(|e| (e.label(), true)).collect()),
         thumb,
         controls: world.get_resource::<crate::bindings::Bindings>().map(|b| b.all().map(|(c, _)| b.text_on(c)).collect()).unwrap_or_default(),
         device: world.get_resource::<crate::bindings::Bindings>().map_or(("Keyboard and Mouse", false), |b| (b.device.name(), b.device == crate::bindings::InputDevice::Controller)),
@@ -4786,9 +4846,9 @@ fn finish_resume(world: &mut World) {
 mod tests {
     #[test]
     fn the_console_entry_stands_where_help_was() {
-        let labels: Vec<&str> = super::entries(true, true).iter().map(|e| e.label()).collect();
+        let labels: Vec<&str> = super::entries(true, false, true).iter().map(|e| e.label()).collect();
         assert_eq!(labels, ["Continue", "Save", "Load", "Settings", CONSOLE_LABEL, MODS_LABEL, "Quit"]);
-        assert!(!super::entries(false, false).contains(&Entry::Console));
+        assert!(!super::entries(false, false, false).contains(&Entry::Console));
     }
 
     #[test]
@@ -5522,7 +5582,7 @@ mod tests {
         let mut app = search_app(&SEARCHED, "pa", SettingsFocus::SearchText);
         app.world_mut().resource_mut::<SearchKeys>().0 = vec![SearchKey::Text("n".into())];
         app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyN);
-        let settings = entries(false, false).iter().position(|e| *e == Entry::Settings).unwrap();
+        let settings = entries(false, false, false).iter().position(|e| *e == Entry::Settings).unwrap();
         app.world_mut().spawn((Button, PauseButton::Column(settings), PointerState::Pressed));
         app.update();
         assert_eq!(*app.world().resource::<Page>(), Page::Main);
@@ -5678,7 +5738,7 @@ mod tests {
 
     #[test]
     fn the_mods_entry_stands_before_quit_only_when_a_mod_added_one() {
-        let labels = |mods| entries(mods, false).iter().map(|e| e.label()).collect::<Vec<_>>();
+        let labels = |mods| entries(mods, false, false).iter().map(|e| e.label()).collect::<Vec<_>>();
         assert_eq!(labels(false), ["Continue", "Save", "Load", "Settings", "Quit"]);
         assert_eq!(labels(true), ["Continue", "Save", "Load", "Settings", "Mods", "Quit"]);
         assert!(Page::Mods.opened_by("Mods"));
@@ -5908,7 +5968,7 @@ mod tests {
             list.saves.push((PathBuf::from(format!("{name}.nvfsave")), h));
         }
         app.insert_resource(list);
-        let drawn = Drawn { page: Page::Load { selected: 1 }, column: entries(false, false).iter().map(|e| (e.label(), true)).collect(), device: ("Keyboard and Mouse", false), rumble: true, sensitivity: 1.0, view_w: VIEW_W as u32, ..default() };
+        let drawn = Drawn { page: Page::Load { selected: 1 }, column: entries(false, false, false).iter().map(|e| (e.label(), true)).collect(), device: ("Keyboard and Mouse", false), rumble: true, sensitivity: 1.0, view_w: VIEW_W as u32, ..default() };
         app.world_mut().run_system_cached_with(|In(d): In<Drawn>, mut commands: Commands, list: Res<LoadList>, glyphs: Res<crate::pad::PadGlyphs>| spawn_page(&mut commands, &d, &PauseLook::plain(), &[], &list, &glyphs), drawn).unwrap();
         let world = app.world_mut();
         let mut rows = world.query::<(&PauseButton, &BorderColor)>();

@@ -178,6 +178,7 @@ pub mod nvse_showoff;
 pub mod nvse_plugins;
 pub mod ray;
 pub mod mod_files;
+pub mod mcm;
 pub mod nvse_traits;
 pub mod nvse_anim;
 pub mod nvse_anim_folders;
