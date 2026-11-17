@@ -977,6 +977,11 @@ pub enum VfsCmd {
         /// lowest precedence first), as NVForever.ini's `[Archive] SArchiveList` sets it.
         #[arg(long)]
         archive_list: Option<String>,
+        /// NVForever's mods layer: one folder per mod, `mods.txt` stating precedence. Its
+        /// plugins' archives are added as the engine mounts them (by full path), and its
+        /// copy of a name wins over Data's. Without it: Data's own archives only.
+        #[arg(long)]
+        mods: Option<PathBuf>,
     },
     /// A Mod Organizer 2 instance's profile as the merge it means (#1526): the enabled
     /// mods from the lowest priority up, the overwrite folder last, and the profile's
