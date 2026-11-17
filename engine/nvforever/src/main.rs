@@ -530,7 +530,7 @@ struct Args {
     /// `enhanced` (ambient occlusion, finer and longer sun shadows, bloom, sharpening,
     /// 16x anisotropic filtering, sun shafts, screen-space water reflections; each also on
     /// the settings page, which also offers FXAA, SMAA or temporal anti-aliasing instead of --msaa;
-    /// docs/design/graphics-enhanced.md). Default: vanilla (`graphics::PLAY_DEFAULT`); test
+    /// docs/design/graphics-enhanced.md). Default: enhanced (`graphics::PLAY_DEFAULT`); test
     /// runs (--screenshot, --timelapse, --frame-json, --run-seconds) always default to it.
     #[arg(long, value_enum)]
     graphics: Option<graphics::Preset>,

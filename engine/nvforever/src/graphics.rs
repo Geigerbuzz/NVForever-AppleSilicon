@@ -116,10 +116,14 @@ pub enum Preset {
 }
 
 /// The default of `--graphics` for normal play (test runs default to vanilla; see
-/// `main.rs` `graphics_preset`). Vanilla: on the owner's PC (GTX 1050) the enhanced look
-/// cost about a third of the frame rate at Goodsprings (docs/design/graphics-enhanced.md
-/// §5), so it is asked for with `--graphics enhanced` or switched on in the settings.
-pub const PLAY_DEFAULT: Preset = Preset::Vanilla;
+/// `main.rs` `graphics_preset`). **Enhanced** since 2026-11-17: the reason it was vanilla
+/// (on the owner's old GTX 1050 it cost about a third of the frame rate at Goodsprings,
+/// docs/design/graphics-enhanced.md §5) does not hold on the Apple Silicon machine this is
+/// built for — its runs are engine-bound at 4.5–6.4 ms a frame at native 3024×1964, and the
+/// owner asked for the better picture rather than the parity one. The settings page's
+/// switches and `--graphics vanilla` turn it back off; the parity and picture checks are
+/// unaffected because test runs still default to vanilla (`main.rs` `graphics_preset`).
+pub const PLAY_DEFAULT: Preset = Preset::Enhanced;
 
 /// Anti-aliasing of the finished picture instead of multisampling (the view is then drawn
 /// without it). `Off`: the multisampling of [`MsaaSetting`].
