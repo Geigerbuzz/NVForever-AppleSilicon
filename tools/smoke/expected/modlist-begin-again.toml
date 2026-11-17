@@ -22,4 +22,6 @@ units_kept_bytes = 0
 # left: ySIGetTagTrait, dATan2, GetVATSLeftAreaFree, GetVATSRightAreaFree (no installed
 # plugin registers them on Blue Moon either), Fists (a form, no command),
 # EnableImprovedRecipeMenu and InitRockItLauncher (JIP commands not catalogued yet).
-"unknown_functions.#" = 7
+# -> 6: ySIGetTagTrait is built (2026-11-17). [Not re-run on that profile here: one name
+# was removed by arithmetic.]
+"unknown_functions.#" = 6

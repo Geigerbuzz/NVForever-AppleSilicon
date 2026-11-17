@@ -21,7 +21,16 @@ grammar.
   the line [observed: probe strings/03 splits "a,b;c" by ",;" in the original game; a GECK
   compile case reported "Mismatched quotes" for a `;` in a string (ext-bytecode.md), to be
   reconciled; no shipped string holds one, so vanilla parity is the same either way]. Blank lines and lines with no letter or digit produce no statement
-  [observed: scripts.md §3.4].
+  [observed: scripts.md §3.4] — except a line of nothing but `)` (or `]`), which closes a
+  call whose arguments stand on the lines above and is kept while one is open
+  [observed: GeneralLightingOverhaul.esp 1.0.2 GLOGetLIGHSrc, `let aSrcs := (Ar_List`
+  then one string a line, then `)` alone, with compiled bytes].
+- A line whose parentheses or brackets are still open at its end is joined with the lines
+  below until they close, so a call's arguments may each stand on their own line; an `if`
+  continued with `||`, `&&` or `)` is the same rule [observed: GeneralLightingOverhaul
+  GLOLamplight/GLOMoonlight/GLOSunlight `(Ar_List …)`; NpcCombatChem.esp's `If (( … )`
+  and `|| ( … )` lines, #2275]. A line balanced at its end still ends a statement. Depths
+  are counted on tokens, so a `(` in a string opens nothing.
 - Tokens: words (letters, digits, `_`, `.`), quoted strings (an unterminated one runs to
   the end of the line), the operators `== != <= >= && || < > + - * / %`, parentheses, and
   any other single character as punctuation. Commas separate like spaces. A word ending
@@ -374,7 +383,12 @@ script decompile`]. "Mod source" below means the engine's compile (`Seed::unknow
 - `({params} =>` with nothing after the arrow opens a lambda whose body is the next lines,
   closed by a line starting with `)`; the rest of that line goes on with the call.
 - An `if`/`elseif` whose parentheses are open at the line's end takes the following lines
-  that start with `||`, `&&` or `)` [hypothesis: only those].
+  to close them [hypothesis: only those; since 2026-11-17 the one rule for every line:
+  see the `(Ar_List` case below].
+- A call's parentheses may span lines: `let aSrcs := (Ar_List` with one argument a line,
+  a `)` on a line of its own, closes it [observed: GeneralLightingOverhaul.esp 1.0.2
+  GLOGetLIGHSrc, GLOLamplight, GLOMoonlight and GLOSunlight ship that shape, all four with
+  compiled bytes; 14 of its 14 units compile from source since].
 - In mod source, a vanilla function's argument in parentheses is an inline expression
   (`RestoreAv Health (player.getav Survival)`), as in a unit of the extender's grammar.
 - Inside parentheses, what is left before the `)` once the expression is whole and ends in

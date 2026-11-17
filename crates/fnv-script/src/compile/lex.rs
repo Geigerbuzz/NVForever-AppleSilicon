@@ -192,12 +192,26 @@ fn block_comments(line: &str, in_block: &mut bool) -> String {
     out
 }
 
+/// How a line's tokens change the depth of an open expression: `(` and `[` open, `)`
+/// and `]` close. The `[` and `]` are single characters ([`Kind::Punct`]), `(` and `)`
+/// have their own kinds; a `(` or `[` inside a string is [`Kind::Str`] and does not count.
+fn depth_of(toks: &[Tok]) -> i32 {
+    toks.iter().fold(0, |d, t| match t.kind {
+        Kind::Open => d + 1,
+        Kind::Close => d - 1,
+        Kind::Punct if t.text == "[" => d + 1,
+        Kind::Punct if t.text == "]" => d - 1,
+        _ => d,
+    })
+}
+
 /// Every line that can produce a statement, with its tokens; `long` collects the numbers
 /// of lines over [`MAX_LINE`] characters.
 pub fn lines(src: &str, long: &mut Vec<usize>) -> Vec<Line> {
     let src = src.trim_end_matches('\0');
     let mut out = Vec::new();
     let mut in_block = false;
+    let mut open = 0i32;
     for (n, raw) in src.split('\n').enumerate() {
         let raw = raw.strip_suffix('\r').unwrap_or(raw);
         let owned = block_comments(raw, &mut in_block);
@@ -206,42 +220,52 @@ pub fn lines(src: &str, long: &mut Vec<usize>) -> Vec<Line> {
             long.push(n + 1);
         }
         let text = strip_comment(raw).trim();
-        if !text.chars().any(|c| c.is_alphanumeric()) {
+        let toks = tokens(text);
+        if toks.is_empty() {
             continue;
         }
-        let toks = tokens(text);
-        if !toks.is_empty() {
-            out.push(Line { no: n + 1, toks, text: text.to_string() });
+        // A line of nothing but `)` closes an expression whose arguments are on the
+        // lines above: it has no letter or digit, but it is not noise [observed:
+        // GeneralLightingOverhaul.esp 1.0.2 GLOGetLIGHSrc's `let aSrcs := (Ar_List`
+        // and a `)` alone after its five strings]. Any other line with no letter or
+        // digit is dropped, as are blank lines [observed: scripts.md §3.4].
+        let closes = toks.iter().all(|t| t.kind == Kind::Close || (t.kind == Kind::Punct && t.text == "]"));
+        if !text.chars().any(|c| c.is_alphanumeric()) && !(closes && open > 0) {
+            continue;
         }
+        open = (open + depth_of(&toks)).max(0);
+        out.push(Line { no: n + 1, toks, text: text.to_string() });
     }
     out
 }
 
-/// An `if`/`elseif` line whose parentheses are still open at its end takes the next lines
-/// that start with `||`, `&&` or `)` until they close [observed: NpcCombatChem.esp ships
-/// `If (( iConf == 4 && … )` with `|| ( iConf == 3 && … )` and more on the lines below, and
-/// compiled bytes testing all of them in one condition, #2275; hypothesis: other lines do
-/// not continue, and a continuation starts so].
-pub fn join_open_conditions(lines: Vec<Line>) -> Vec<Line> {
-    let depth = |t: &str| t.chars().fold(0i32, |d, c| match c {
-        '(' => d + 1,
-        ')' => d - 1,
-        _ => d,
-    });
+/// A line whose parentheses or brackets are still open at its end takes the lines below
+/// until they close: a call's arguments may each stand on their own line, and an `if`
+/// whose condition continues with `||`, `&&` or `)` is the same rule [observed:
+/// GeneralLightingOverhaul.esp 1.0.2 GLOGetLIGHSrc ships `let aSrcs := (Ar_List` with
+/// one string a line and a `)` on a line of its own, compiled; GLOLamplight's,
+/// GLOMoonlight's and GLOSunlight's `(Ar_List` likewise; NpcCombatChem.esp ships
+/// `If (( iConf == 4 && … )` with `|| ( iConf == 3 && … )` and more below, and compiled
+/// bytes testing all of them in one condition, #2275]. A line balanced at its end still
+/// ends a statement, so no two statements are ever joined. Depths are counted on tokens,
+/// so a `(` in a string does not open one.
+///
+/// This runs after the block lambdas are taken out ([`crate::compile::Gen`]): their
+/// `(begin function {…}` line opens a parenthesis that only its `end)` closes, and they
+/// need their lines apart.
+pub fn join_open_lines(lines: Vec<Line>) -> Vec<Line> {
     let mut out: Vec<Line> = Vec::new();
     let mut open = 0i32;
     for l in lines {
-        let starts = |p: &str| l.text.starts_with(p);
-        if open > 0 && (starts("||") || starts("&&") || starts(")")) {
+        if open > 0 {
             if let Some(prev) = out.last_mut() {
                 prev.text = format!("{} {}", prev.text, l.text);
                 prev.toks = tokens(&prev.text);
-                open += depth(&l.text);
+                open = (open + depth_of(&l.toks)).max(0);
                 continue;
             }
         }
-        let head = l.toks.first().map(|t| t.text.to_ascii_lowercase());
-        open = if matches!(head.as_deref(), Some("if" | "elseif")) { depth(&l.text) } else { 0 };
+        open = depth_of(&l.toks).max(0);
         out.push(l);
     }
     out

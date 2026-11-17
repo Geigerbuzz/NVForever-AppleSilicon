@@ -1722,6 +1722,20 @@ fn an_if_with_open_parentheses_takes_the_lines_that_continue_it() {
 }
 
 #[test]
+fn a_calls_parentheses_take_the_arguments_on_the_lines_below() {
+    // [observed: GeneralLightingOverhaul.esp 1.0.2 GLOGetLIGHSrc ships `let aSrcs :=
+    // (Ar_List` with one string a line and `)` alone; GLOLamplight, GLOMoonlight and
+    // GLOSunlight ship the same shape, all four with compiled bytes.]
+    let (c, p) = mod_ok("array_var a\nbegin GameMode\n\tlet a := (Ar_List\n\t\t\"fire\"\n\t\t\"muzzle\"\n\t\t\"street\"\n\t)\n\tlet a := Ar_List \"one\"\nend");
+    assert_eq!(c.errors().count(), 0, "{:?}", c.errors().collect::<Vec<_>>());
+    assert_eq!(body(&p).len(), 2, "{:?}", body(&p));
+    assert_eq!(call_args(&p, "Ar_List"), Some(3));
+    // A `(` inside a string does not open one.
+    let (c, _) = mod_ok("begin GameMode\nprint \"(not a parenthesis\"\nend");
+    assert_eq!(c.errors().count(), 0, "{:?}", c.errors().collect::<Vec<_>>());
+}
+
+#[test]
 fn a_mods_runtime_file_calls_a_function_nothing_knows() {
     // A Script Runner file naming a plugin function with no page compiles; the console's
     // line keeps the error.

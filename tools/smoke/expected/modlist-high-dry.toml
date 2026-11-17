@@ -19,4 +19,6 @@ units_kept_bytes = 9
 # Functions the scripts call that NVForever has no entry for (their calls do nothing).
 # -> 10 measured after the base took in #2320's unlisted JIP commands and #2335's
 # MoveToMarker alias; the 10 left are Blue Moon's 11 without fLuckSaveMult.
-"unknown_functions.#" = 10
+# -> 9: ySIGetTagTrait is built (2026-11-17). [Not re-run on that profile here: one name
+# was removed by arithmetic.]
+"unknown_functions.#" = 9
