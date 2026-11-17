@@ -823,7 +823,58 @@ impl Gen<'_> {
             }
             args.push(a);
         }
+        // Arguments past those the function takes are dropped with a warning, as on a
+        // call line ([`Self::xcall_line`]), and the expression goes on at the next
+        // operator [observed: B42 Optics' ln_B42Optics.txt line 319,
+        // `!Player.IsAnimPlayingEx 5 0 0 1` — four arguments where the page lists three,
+        // inside an `if eval` line, which the original's compiler took; issue #1470,
+        // observer check 81's case (c)].
+        // (Inside parentheses the leftover is their own rule's: the call's surplus operand
+        // is reported by `xprimary` as `rest_of_parentheses_dropped`.)
+        let full = !self.in_paren && f.params.is_some_and(|n| base + args.len() >= n);
+        let more = p.peek().is_some_and(|t| starts_operand(Some(t)) || t.is(XKind::Op, "-") && t.sign);
+        if full && more {
+            let rest = p.rest();
+            let at = p.i;
+            let saved = (self.refs.clone(), self.claims.clone(), self.vars.clone(), self.ref_vars.clone(), self.lambda_seq, self.diags.len());
+            let n = self.surplus_operands(p);
+            (self.refs, self.claims, self.vars, self.ref_vars, self.lambda_seq) = (saved.0, saved.1, saved.2, saved.3, saved.4);
+            self.diags.truncate(saved.5);
+            match n {
+                0 => p.i = at,
+                n => self.diag("surplus_arguments", false, format!("{n} dropped: {rest}")),
+            }
+        }
         Some(args)
+    }
+
+    /// The operands left after a call inside an expression, parsed and dropped: the
+    /// expression goes on at the operator they stop at. What they registered is undone by
+    /// the caller's saved state. `p` is left at the operator (or where it was, when the
+    /// first operand cannot be read).
+    fn surplus_operands(&mut self, p: &mut P<'_>) -> usize {
+        let mut n = 0;
+        loop {
+            if p.peek().is_some_and(|t| t.kind == XKind::Comma) {
+                p.next();
+            }
+            let minus = p.peek().is_some_and(|t| t.is(XKind::Op, "-") && t.sign);
+            if !starts_operand(p.peek()) && !minus {
+                break;
+            }
+            let at = p.i;
+            let was = std::mem::replace(&mut self.in_args, true);
+            let was_any = std::mem::replace(&mut self.in_arg_any, true);
+            let a = self.xexpr(p, ARG);
+            self.in_args = was;
+            self.in_arg_any = was_any;
+            if a.is_none() {
+                p.i = at;
+                break;
+            }
+            n += 1;
+        }
+        n
     }
 
     /// What the extender's runtime compiler refuses in argument `k` of `f`

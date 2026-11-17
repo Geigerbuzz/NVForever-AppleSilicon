@@ -1829,6 +1829,23 @@ end");
     assert_eq!(call_args(&p, "Call"), Some(2));
 }
 
+/// An extra argument in an expression is dropped with a warning, as on a call line: the
+/// B42 Optics Script Runner's line 319 passes four arguments to JIP's `IsAnimPlayingEx`,
+/// whose page lists three, inside an `if eval` [observed: ln_B42Optics.txt, issue #1470;
+/// the original's compiler took the file].
+#[test]
+fn a_surplus_argument_in_an_expression_is_dropped() {
+    let src = "begin GameMode
+if eval !Player.IsAnimPlayingEx 5 0 0 1 && !Player.IsAnimPlayingEx 4 0 0 1 && Player.GetAnimAction != 13
+endif
+end";
+    let (c, p) = mod_ok(src);
+    assert_eq!(warnings(&c, "surplus_arguments").len(), 2, "{:?}", c.diags);
+    let json = serde_json::to_string(&body(&p)).unwrap();
+    assert_eq!(json.matches("\"IsAnimPlayingEx\"").count(), 2, "{json}");
+    assert!(json.contains("\"and\""), "{json}");
+}
+
 #[test]
 fn a_string_keeps_the_line_break_it_holds() {
     // [observed: Animated Ingestibles.esp's MCM SetUIString, whose compiled string length
