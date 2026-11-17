@@ -380,7 +380,9 @@ apart].
 
 How the compiler turns a source line into a statement, as far as the canonical text needs
 it [observed: these rules reproduce the bytes for the units of §3.6's result]:
-- Comments run from `;` (outside double quotes) to the end of the line. Blank lines,
+- Comments run from `;` (outside double quotes) to the end of the line. A string literal
+  may hold its line break and keep it in the value [observed: Animated Ingestibles.esp's
+  MCM SetUIString, its SCDA holding the CRLF]. Blank lines,
   variable declarations (`short`, `int`, `long`, `float`, `ref`, `reference`) and **lines
   without any letter or digit** produce no statement. The last rule explains the ten
   units whose line count does not match (script-functions.md §3.2 and §7), one by one:

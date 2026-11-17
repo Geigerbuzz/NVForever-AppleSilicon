@@ -151,7 +151,10 @@ reads the tokens after `eval` as one expression (`Kw::Eval`).
 **TestExpr** `TestExpr expr` (NVSE 4.1): evaluates the expression, side effects
 included, and returns 1 if it ran without an extender error, 0 if it raised one; the
 error is not printed [documented: TestExpr]. `if TestExpr a[k] += 1` increments when the
-key exists and is false otherwise.
+key exists and is false otherwise. On a line of its own the whole expression is the
+argument, assignments and inline declarations included (`testexpr Coordinates := Ar_List
+gridX, gridY`, `testexpr array_var aCoordsIn = Call …`) [observed: SD_RadiantInfinium.esp,
+shipped with compiled bytes; `compile::parse::Kw::TestExpr`].
 
 **Inline declaration** (xNVSE 6.1.0): a type may stand before the first use instead of
 in the variable list at the top: `let int i := 10`, `int i = 10`, `foreach array_var it
@@ -209,6 +212,14 @@ space does [observed: Unofficial Patch NVSE Plus ships that line with compiled b
 hypothesis: the original's compiler takes commas as spaces there]. After a function that
 takes no argument, or can go without its first, the comma belongs to what the call stands
 in (`ar_List GetSelf, 2` is two elements) [design].
+
+**A brace group is the call's argument list.** `{}` is no argument, `{a, b}` two, and
+`{(expr)}` still one; the group is read from that parameter position on, so a nested call
+keeps its commas (`Call Fn {Rand 0, 10}` is one argument) [observed: Animated
+Ingestibles.esp's `call Fn {(BuildRef 0 n)}` and `call Fn {Q.v}`; SD_Fatigue.esp's
+`rActor.call SDFnKarmaLoss {rActor, -15}`, `call SDFnUpdateWeaponList {}`, `call
+SDFnActivateMenuA {rTarget, rAction}` and the six-argument `call SDFnCalculateFatigue
+{…}`, all with compiled bytes]. A `{…}` followed by `=>` is a lambda instead (§7).
 
 **GetFactionRank in an extender expression** takes its faction, though the catalogue's
 row has no parameter list: a numbered function with no listed parameters takes its

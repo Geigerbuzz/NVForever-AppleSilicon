@@ -20,7 +20,12 @@ grammar.
 - A line ends at a line break. Comments run from `;` outside double quotes to the end of
   the line [observed: probe strings/03 splits "a,b;c" by ",;" in the original game; a GECK
   compile case reported "Mismatched quotes" for a `;` in a string (ext-bytecode.md), to be
-  reconciled; no shipped string holds one, so vanilla parity is the same either way]. Blank lines and lines with no letter or digit produce no statement
+  reconciled; no shipped string holds one, so vanilla parity is the same either way]. A
+  string literal may hold its line break: the editor reads it as text, not as the end of
+  the line, and the file's own `\r\n` stays in the string [observed: Animated
+  Ingestibles.esp's MCM script, `SetUIString "… other mods.<CRLF>"` with the closing `"`
+  on the next line, and compiled bytes whose length (0xE8) counts the CRLF]. Blank lines
+  and lines with no letter or digit produce no statement
   [observed: scripts.md §3.4] — except a line of nothing but `)` (or `]`), which closes a
   call whose arguments stand on the lines above and is kept while one is open
   [observed: GeneralLightingOverhaul.esp 1.0.2 GLOGetLIGHSrc, `let aSrcs := (Ar_List`
@@ -302,7 +307,11 @@ expression parser), `vm.rs` (`xeval`).
   block, and inside it `if`, `elseif` and `set` take extended expressions too, with the
   argument rule above [documented: Script Compiler Override].
 - **Which lines.** `let …`; the Let macro, a name followed by `=`, `+=`, `-=` or `*=`
-  [documented: Let Macro lists these four]; `if eval …` / `elseif eval …`; `while …`,
+  [documented: Let Macro lists these four]; `if eval …` / `elseif eval …`;
+  `testexpr …` (one whole expression, run for what it does; its 0/1 is dropped)
+  [documented: TestExpr; observed: SD_RadiantInfinium.esp's `testexpr Coordinates :=
+  Ar_List gridX, gridY` and `testexpr array_var aCoordsIn = Call …`, whose compiled bytes
+  are a TestExpr call of the whole expression]; `while …`,
   `foreach <var> <- <source>`, `loop`, `break`, `continue` [documented: While; ForEach]. Every
   other line is read as vanilla, so the shipped units compile as before (§5, unchanged).
 - **Tokens.** The operators of NVSE Expressions (`:=` and the compound assignments,
@@ -325,7 +334,12 @@ expression parser), `vm.rs` (`xeval`).
   `Sin 14 == 1` example; the bitwise operators inside, hypothesis]. Arguments are separated
   by a comma or by two operands meeting without an operator, and a `-` starts the first
   argument or one after a comma (`Abs -3`, `Rand -5, -1`) [hypothesis; probes in
-  tools/capture/ext-probes/expressions]. A function with a format string takes all the
+  tools/capture/ext-probes/expressions]. A brace group stands for the arguments it holds:
+  `{}` none, `{a, b}` two, `{(expr)}` one, read from that parameter position on, so a
+  nested call keeps its commas (`Call Fn {Rand 0, 10}` is one argument) [observed:
+  Animated Ingestibles.esp's `call Fn {(BuildRef 0 n)}` and `call Fn {Q.v}`, and
+  SD_Fatigue.esp's `rActor.call SDFnKarmaLoss {rActor, -15}`, `call SDFnUpdateWeaponList
+  {}` and the six-argument `call SDFnCalculateFatigue {…}`, all with compiled bytes]. A function with a format string takes all the
   arguments that follow (up to 20 values [documented: String Formatting]); the catalogue
   marks those as a parameter named or typed "Formatting"/"formatable". In a parameter that takes an actor value, an axis or a
   string, a lone name is that name. A function the catalogue lists without an opcode (the
