@@ -627,6 +627,7 @@ pub fn registry() -> &'static [(u16, &'static str, Kind)] {
             (0x11EB, "SetVatsTarget", Impl(crate::vats::set_vats_target)),
             (0x10EB, "GetVATSTargetHeight", Impl(crate::vats::get_vats_target_height)),
             (0x10E0, "GetVATSMode", Impl(crate::vats::get_vats_mode)),
+            (0x1209, "GetVATSFrontAreaFree", Impl(crate::vats::get_vats_front_area_free)),
             (0x102D, "GetDetected", Impl(crate::detection::get_detected)),
             (0x10B4, "GetDetectionLevel", Impl(crate::detection::get_detection_level)),
             (0x101B, "GetLineOfSight", Impl(senses::get_line_of_sight)),

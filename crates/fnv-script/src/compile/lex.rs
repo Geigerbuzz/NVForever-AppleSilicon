@@ -205,6 +205,24 @@ fn depth_of(toks: &[Tok]) -> i32 {
     })
 }
 
+/// Whether a line has a `/*` or `*/` outside double quotes (a block-comment marker):
+/// [`lines`] does not join its lines around one.
+fn block_marker(line: &str) -> bool {
+    let cs: Vec<char> = line.chars().collect();
+    let mut quoted = false;
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '"' => quoted = !quoted,
+            '/' if !quoted && cs.get(i + 1) == Some(&'*') => return true,
+            '*' if !quoted && cs.get(i + 1) == Some(&'/') => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Every line that can produce a statement, with its tokens; `long` collects the numbers
 /// of lines over [`MAX_LINE`] characters.
 pub fn lines(src: &str, long: &mut Vec<usize>) -> Vec<Line> {
@@ -212,9 +230,27 @@ pub fn lines(src: &str, long: &mut Vec<usize>) -> Vec<Line> {
     let mut out = Vec::new();
     let mut in_block = false;
     let mut open = 0i32;
-    for (n, raw) in src.split('\n').enumerate() {
-        let raw = raw.strip_suffix('\r').unwrap_or(raw);
-        let owned = block_comments(raw, &mut in_block);
+    let raws: Vec<&str> = src.split('\n').collect();
+    let mut i = 0;
+    while i < raws.len() {
+        let n = i;
+        // A string literal may hold its line break: the editor's lexer reads it as text,
+        // not as the end of the line [observed: Animated Ingestibles.esp's MCM script
+        // ships `SetUIString "… other mods.<CRLF>"`, the string opened on one line and
+        // closed on the next, with compiled bytes holding the CRLF; its SCTX has the
+        // break too]. The break is kept as the file has it, so the bytes match.
+        let mut joined = raws[i].strip_suffix('\r').unwrap_or(raws[i]).to_string();
+        let mut ended_with_cr = raws[i].ends_with('\r');
+        i += 1;
+        // Not across a block comment: a quote in `/* … */` is text, and no shipped script
+        // mixes an unterminated string with one.
+        while !in_block && unclosed_quote(strip_comment(&joined)) && !block_marker(&joined) && i < raws.len() {
+            joined.push_str(if ended_with_cr { "\r\n" } else { "\n" });
+            ended_with_cr = raws[i].ends_with('\r');
+            joined.push_str(raws[i].strip_suffix('\r').unwrap_or(raws[i]));
+            i += 1;
+        }
+        let owned = block_comments(&joined, &mut in_block);
         let raw = owned.as_str();
         if raw.chars().count() > MAX_LINE {
             long.push(n + 1);
@@ -410,6 +446,23 @@ mod tests {
         assert_eq!(texts("SomeREF. Disable"), ["SomeREF.Disable"]);
         assert_eq!(texts("AddItem Caps001, 10"), ["AddItem", "Caps001", "10"]);
         assert_eq!(texts("set x to 1. * 2"), ["set", "x", "to", "1.", "*", "2"]);
+    }
+
+    #[test]
+    fn a_string_may_hold_its_line_break() {
+        // [observed: Animated Ingestibles.esp's MCM script]. The CRLF stays in the string
+        // (its compiled bytes hold it), and the next line is not a statement of its own.
+        let mut long = Vec::new();
+        let l = lines("set s to \"a\r\nb\"\r\nset t to 1\r\n", &mut long);
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0].toks[3], Tok { kind: Kind::Str, text: "a\r\nb".into() });
+        assert_eq!(l[0].no, 1);
+        assert_eq!(l[1].no, 3);
+        assert_eq!(l[1].toks[0].text, "set");
+        // A `/*` inside a string is text, not a block comment: the line still joins.
+        let l = lines("set s to \"C/*x\" \"a\r\nb\"\r\n", &mut long);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].toks[4], Tok { kind: Kind::Str, text: "a\r\nb".into() });
     }
 
     #[test]

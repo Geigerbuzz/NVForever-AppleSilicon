@@ -1830,6 +1830,58 @@ end");
 }
 
 #[test]
+fn a_brace_group_is_the_calls_argument_list() {
+    // [observed: SD_Fatigue.esp 1.0, `rActor.call SDFnKarmaLoss {rActor, -15}` with its
+    // two parameters filled, `call SDFnUpdateWeaponList {}` with none, and
+    // `rActor.call SDFnKillActor {rActor, bCannibal}`; SD_RadiantInfinium.esp's
+    // `call SDFnActivateMenuA {rTarget, rAction}` likewise.] The braces group the
+    // arguments; they are not one array.
+    let (c, p) = mod_ok("short b
+ref r
+begin GameMode
+if eval 1
+call TestQuest {}
+call TestQuest {r, b}
+endif
+end");
+    assert!(c.diags.iter().all(|d| d.kind != "syntax"), "{:?}", c.diags);
+    let json = serde_json::to_string(&body(&p)).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let ifs = doc.as_array().unwrap().iter().find(|s| s["stmt"] == "if").unwrap();
+    let calls: Vec<usize> = ifs["arms"][0]["body"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["expr"]["call"].is_object())
+        .map(|s| s["expr"]["call"]["args"].as_array().unwrap().len())
+        .collect();
+    // The function's form alone, then the same and the two arguments after it.
+    assert_eq!(calls, [1, 3]);
+}
+
+#[test]
+fn a_testexpr_line_runs_the_expression_and_drops_the_result() {
+    // [observed: SD_RadiantInfinium.esp SCPT 0x0100194E, `testexpr Coordinates := Ar_List
+    // gridX, gridY`, and SCPT 0x01007C42, `testexpr array_var aCoordsIn = Call …`: the
+    // original's bytes hold a TestExpr call of the whole expression.]
+    let (c, p) = mod_ok("array_var a
+int x
+int y
+begin GameMode
+testexpr a := Ar_List x, y
+testexpr array_var n = Call TestQuest
+end");
+    assert_eq!(c.errors().count(), 0, "{:?}", c.diags);
+    let b = body(&p);
+    for s in b {
+        assert!(matches!(s, Stmt::Eval { expr: fnv_script::ir::XExpr::Call { .. } }), "{s:?}");
+    }
+    let json = serde_json::to_string(b).unwrap();
+    assert!(json.contains("TestExpr"), "{json}");
+    assert!(json.contains("\"assign\""), "{json}");
+}
+
+#[test]
 fn an_operand_meeting_a_whole_expression_in_parentheses_is_dropped() {
     // [observed: MrShersh Functional Backpack.esp, `("…" + $sv ".nif")` ends at the variable.]
     let (c, _) = mod_ok("string_var s

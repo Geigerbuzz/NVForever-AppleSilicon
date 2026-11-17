@@ -200,6 +200,17 @@ pub fn get_vats_mode(g: &mut Game, _ctx: &Ctx, _a: &Args) -> Result<Value, Strin
     Ok(Value::Num(g.vats.mode as f64))
 }
 
+/// `ref.GetVATSFrontAreaFree` [documented: GECK wiki, "Check to see if a VATS camera can
+/// fit on the front side"; xEdit wbDefinitionsFNV's condition 521 `GetVATSFrontAreaFree`,
+/// one reference parameter; observed: opcode 0x1209 in FPS Weapon Lowering.esp, its result
+/// compared with 100 and 180, so it is a distance in game units]: the front component of
+/// the room the engine measured for the kill camera ([`CameraRoom::area_free`]), 0 while
+/// none was measured. The calling reference and the optional argument do not change it:
+/// the measurement is the shot's, as for the condition.
+pub fn get_vats_front_area_free(g: &mut Game, _ctx: &Ctx, _a: &Args) -> Result<Value, String> {
+    Ok(Value::Num(area_value(g, FRONT_AREA_FREE)))
+}
+
 /// `GetVATSTargetHeight` (module notes): the height of the shot leaving now over the
 /// player's feet, 0 when none leaves.
 pub fn get_vats_target_height(g: &mut Game, _ctx: &Ctx, _a: &Args) -> Result<Value, String> {

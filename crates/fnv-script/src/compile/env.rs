@@ -38,12 +38,22 @@ fn formid(data: &[u8]) -> Option<u32> {
 impl<'a> LoadOrderIndex<'a> {
     pub fn build(lo: &'a LoadOrder<'a>, units: &[ScriptUnit]) -> LoadOrderIndex<'a> {
         let n = lo.plugins.len();
+        // The game's own master is loaded in every game: a plugin whose header lists no
+        // masters (Helmet Overlay.esm 1.03 has none) still writes forms of FalloutNV.esm
+        // in its source, and the original's compiler resolved them [observed: Helmet
+        // Overlay.esm SCPT 0x5F000816's `float fHour = GameHour` — GameHour is GLOB
+        // 0x00000038 of FalloutNV.esm, and the shipped bytes name ref slot 0x38; the
+        // plugin's missing master is a defect of the mod, not of the name].
+        let base = lo.plugins.iter().position(|p| p.name.eq_ignore_ascii_case("FalloutNV.esm"));
         let visible = (0..n)
             .map(|i| {
                 let mut v = vec![false; n];
                 v[i] = true;
                 for &m in lo.master_map(i) {
                     v[m as usize] = true;
+                }
+                if let Some(b) = base {
+                    v[b] = true;
                 }
                 v
             })

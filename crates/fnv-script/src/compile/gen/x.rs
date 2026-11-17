@@ -635,9 +635,17 @@ impl Gen<'_> {
     }
 
     fn xargs(&mut self, p: &mut P<'_>, f: &XFn) -> Option<Vec<XExpr>> {
+        self.xargs_from(p, f, 0)
+    }
+
+    /// [`Self::xargs`] with `base` arguments already taken by the call. A brace group's
+    /// contents are read as the call's arguments from that place on (`Call Fn {a, b}` is
+    /// two arguments, `Call Fn {}` none), so their encodings are the call's later ones.
+    fn xargs_from(&mut self, p: &mut P<'_>, f: &XFn, base: usize) -> Option<Vec<XExpr>> {
         let mut args = Vec::new();
         loop {
-            if f.params.is_some_and(|n| args.len() >= n) {
+            let at = base + args.len();
+            if f.params.is_some_and(|n| at >= n) {
                 break;
             }
             let mut comma = false;
@@ -647,7 +655,7 @@ impl Gen<'_> {
             // with compiled bytes; hypothesis: the original's compiler takes a comma
             // there as it takes a space]. Before a first argument the function can go
             // without, or none, the comma ends the call (a list's next element).
-            let leading = args.is_empty() && self.first_param_required(f) && starts_operand(p.peek2());
+            let leading = at == 0 && args.is_empty() && self.first_param_required(f) && starts_operand(p.peek2());
             if (!args.is_empty() || leading) && p.peek().is_some_and(|t| t.kind == XKind::Comma) {
                 p.next();
                 comma = true;
@@ -661,28 +669,51 @@ impl Gen<'_> {
             // compiled bytes holding the variable and the box operator as the first of
             // five arguments, #2275].
             let boxed = comma && p.peek().is_some_and(|t| t.is(XKind::Op, "&"));
-            // `{expr}` not followed by `=>` is the expression, one argument (`call Fn
-            // {(BuildRef 0 n)}`, `call Fn {Quest.var}`) [observed: Animated Ingestibles.esp
-            // ships both with compiled bytes holding the value alone as the one argument,
-            // #2275].
+            // `{…}` not followed by `=>` groups arguments, from the ones it holds alone to
+            // a comma-separated list: `call Fn {(BuildRef 0 n)}` and `call Fn {Quest.var}`
+            // pass one value, `rActor.call SDFnKarmaLoss {rActor, -15}` two, and `call
+            // SDFnUpdateWeaponList {}` none [observed: Animated Ingestibles.esp's and
+            // SD_Fatigue.esp's version 1.0 sources ship each form with compiled bytes].
+            // The contents are read as the call's own arguments, so a nested call keeps
+            // its commas (`Call Fn {Rand 0, 10}` is one argument).
             let braced = p.peek().is_some_and(|t| t.kind == XKind::LBrace) && !lambda_at(p);
             let boxing = f.params != Some(0) && p.peek().is_some_and(|t| t.sign && (t.is(XKind::Op, "*") || t.is(XKind::Op, "&")));
             if !starts_operand(p.peek()) && !minus_first && !boxed && !boxing && !braced {
                 break;
             }
             if braced {
-                p.next();
-                let was = std::mem::replace(&mut self.in_args, false);
-                let was_paren = std::mem::replace(&mut self.in_paren, true);
-                let e = self.xexpr(p, 0);
-                self.in_args = was;
-                self.in_paren = was_paren;
-                let e = e?;
-                if p.next().map(|c| c.kind) != Some(XKind::RBrace) {
+                let start = p.i + 1;
+                let mut depth = 0i32;
+                let mut end = None;
+                for (j, t) in p.t.iter().enumerate().skip(start) {
+                    match t.kind {
+                        XKind::LBrace => depth += 1,
+                        XKind::RBrace if depth == 0 => {
+                            end = Some(j);
+                            break;
+                        }
+                        XKind::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                }
+                let Some(end) = end else {
                     self.xerr("syntax", "missing }");
                     return None;
+                };
+                let was = std::mem::replace(&mut self.in_args, false);
+                let was_paren = std::mem::replace(&mut self.in_paren, true);
+                let mut q = P::new(&p.t[start..end]);
+                let more = self.xargs_from(&mut q, f, at);
+                self.in_args = was;
+                self.in_paren = was_paren;
+                let more = more?;
+                if !q.done() {
+                    let rest = q.rest();
+                    self.xerr("syntax", format!("unexpected {rest}"));
+                    return None;
                 }
-                args.push(e);
+                args.extend(more);
+                p.i = end + 1;
                 continue;
             }
             // A string variable given by name to an xNVSE function's plain string
@@ -690,7 +721,7 @@ impl Gen<'_> {
             // `SetStringIniSetting "sLanguage:General" sText` set the text "sText";
             // documented: SetNameEx, "does not accept string variables directly … must be
             // converted", `$sv`; hypothesis: JIP's and the other plugins' functions differ].
-            if self.call_line && !self.in_args && !f.aware && !self.in_paren && self.plain_string_param(f, args.len()) {
+            if self.call_line && !self.in_args && !f.aware && !self.in_paren && self.plain_string_param(f, at) {
                 if let Some(t) = p.peek().filter(|t| t.kind == XKind::Word && !t.text.contains('.')).cloned() {
                     let string_var = self.var(&t.text).is_some_and(|v| matches!(&v.ty, crate::unit::VarType::Other(s) if s == "string_var"));
                     let alone = !p.peek2().is_some_and(|n| matches!(n.kind, XKind::LBracket | XKind::Op));
@@ -705,7 +736,7 @@ impl Gen<'_> {
             // is the name as text, not the setting's record [observed: WaterToTravel.esp
             // ships `SetStringSetting sNoFastTravelScriptBlock "…"` with compiled bytes
             // whose reference list does not hold the setting, #2275].
-            if self.string_param(f, args.len()) {
+            if self.string_param(f, at) {
                 if let Some(t) = p.peek().filter(|t| t.kind == XKind::Word && !t.text.contains('.')).cloned() {
                     let alone = !p.peek2().is_some_and(|n| matches!(n.kind, XKind::LBracket | XKind::Op));
                     let setting = self.var(&t.text).is_none() && self.form(&t.text).is_some_and(|fi| &fi.sig == b"GMST");
@@ -720,7 +751,7 @@ impl Gen<'_> {
             // named for a global) is the global, not its value [observed: plugins3,
             // `GetGlobalValue TimeScale` reads 30 and `SetGlobalValue TimeScale 31` sets
             // it in the original].
-            if self.form_param(f, args.len()) {
+            if self.form_param(f, at) {
                 if let Some(t) = p.peek().filter(|t| t.kind == XKind::Word && !t.text.contains('.')).cloned() {
                     let alone = !p.peek2().is_some_and(|n| matches!(n.kind, XKind::LBracket | XKind::Op));
                     let global = self.var(&t.text).is_none().then(|| self.form(&t.text)).flatten().filter(|fi| &fi.sig == b"GLOB");
@@ -748,8 +779,8 @@ impl Gen<'_> {
                 }
             }
             let enc = match f.opcode {
-                Some(o) => self.table.param_enc(o, args.len()),
-                None if self.axis_param(f, args.len()) => ParamEnc::Axis,
+                Some(o) => self.table.param_enc(o, at),
+                None if self.axis_param(f, at) => ParamEnc::Axis,
                 None => ParamEnc::Value,
             };
             // Inside an expression an NVSE-aware function's argument stops at a comparison
@@ -760,7 +791,7 @@ impl Gen<'_> {
             // 0x0700254B, Party Banter 2.esm SCPT 0x0701D892, #2275]. Arithmetic stays in
             // the argument and a range or pair (`1:2`, `"k"::v`) continues it, as in an
             // override block [hypothesis].
-            let nested_aware = f.aware && self.in_expression() && !self.expression_param(f, args.len());
+            let nested_aware = f.aware && self.in_expression() && !self.expression_param(f, at);
             let min = if f.aware && !nested_aware {
                 ARG_OVERRIDE
             } else if self.co || nested_aware {
@@ -788,7 +819,7 @@ impl Gen<'_> {
             self.in_arg_any = was_any;
             let a = a?;
             if self.runtime {
-                self.runtime_refusal(f, args.len(), &a);
+                self.runtime_refusal(f, at, &a);
             }
             args.push(a);
         }

@@ -2276,6 +2276,19 @@ fn forced_reactions_vats_targets_and_water_objects() {
     assert_eq!(g.activating(FormId::PLAYER_REF), None);
 }
 
+/// GetVATSFrontAreaFree: the front of the room the engine measured for the kill camera,
+/// 0 while none was measured [documented: GECK wiki "Check to see if a VATS camera can fit
+/// on the front side"; observed: opcode 0x1209 in FPS Weapon Lowering.esp].
+#[test]
+fn the_vats_front_area_is_the_measured_front_room() {
+    use fnv_game::vats::CameraRoom;
+    let f = fixture();
+    let mut g = game(&f);
+    assert_eq!(call(&mut g, 0x1209, Some(ADULT_REF), &[]), 0.0);
+    g.vats.room = Some(CameraRoom { area_free: [10.0, 20.0, 30.0, 140.0], target_visible: [0.0; 4] });
+    assert_eq!(call(&mut g, 0x1209, Some(ADULT_REF), &[]), 140.0);
+}
+
 /// A call that succeeds although its function could not read an argument it passed is
 /// traced as `ArgUnread` (#1122), once per opcode, unit and parameter; a failed call and
 /// an absent argument are not.

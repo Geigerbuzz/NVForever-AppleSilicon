@@ -243,9 +243,28 @@ fn a_name_resolves_when_another_record_shares_its_formid() {
     assert_eq!(c.refs, [RefSlot::Form(0x801)]);
 }
 
+/// A plugin whose header lists no masters still sees the game's own master: Helmet
+/// Overlay.esm 1.03 (no MAST at all) reads GameHour, GLOB 0x38 of FalloutNV.esm, in
+/// `float fHour = GameHour` [observed: its SCPT 0x5F000816, whose shipped bytes name the
+/// global].
 #[test]
-fn serialized_extender_variable_kinds_survive_the_unit_reader() {
-    let mut fields = vec![sub(b"EDID", z("OwnedKinds"))];
+fn a_plugin_without_masters_sees_the_game_master() {
+    use fnv_script::compile::{compile, env::LoadOrderIndex};
+    let game_glob = record(b"GLOB", 0x38, &[sub(b"EDID", z("GameHour"))]);
+    let game = [tes4(&[]), top(b"GLOB", &game_glob)].concat();
+    let script = record(b"SCPT", 0x801, &[&[sub(b"EDID", z("H"))][..], &unit(1, &[0x1D, 0, 0, 0], "scn H\nfloat fHour = GameHour", &[(1, "fHour", 0)], &[])].concat());
+    let mod_plugin = [tes4(&[]), top(b"SCPT", &script)].concat();
+    let plugins = vec![Plugin::parse(&game, "FalloutNV.esm".into()).unwrap(), Plugin::parse(&mod_plugin, "H.esm".into()).unwrap()];
+    let lo = LoadOrder::new(&plugins).unwrap();
+    let (units, _) = read_load_order(&lo, &schema());
+    let ix = LoadOrderIndex::build(&lo, &units);
+    let c = compile("scn T\nfloat fHour = GameHour", &table(), &ix.env(1), None);
+    assert_eq!(c.errors().count(), 0, "{:?}", c.diags);
+    assert_eq!(c.refs, [RefSlot::Form(0x38)]);
+}
+
+#[test]
+fn serialized_extender_variable_kinds_survive_the_unit_reader() {    let mut fields = vec![sub(b"EDID", z("OwnedKinds"))];
     fields.extend(unit(0, &[], "scn OwnedKinds", &[(1, "textSlot", 2), (2, "arraySlot", 3), (3, "refSlot", 4), (4, "unknownSlot", 200)], &[]));
     let bytes = [tes4(&[]), top(b"SCPT", &record(b"SCPT", 0x900, &fields))].concat();
     let plugins = vec![Plugin::parse(&bytes, "Owned.esm".into()).unwrap()];

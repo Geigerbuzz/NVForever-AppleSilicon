@@ -61,6 +61,12 @@ pub enum Kw {
     /// taking an expression; observed: JustAssortedMods.esp 4.6 ships 32 such lines with
     /// compiled bytes, two of them assignments].
     Eval(Vec<XTok>),
+    /// `testexpr <expression>` on a line of its own: the tokens after `testexpr`. The
+    /// expression is run for what it does (side effects included) and the 0/1 TestExpr
+    /// gives back is dropped [documented: TestExpr; observed: SD_RadiantInfinium.esp ships
+    /// `testexpr Coordinates := Ar_List gridX, gridY` and `testexpr array_var aCoordsIn =
+    /// Call …` with compiled bytes holding a TestExpr call of the whole expression].
+    TestExpr(Vec<XTok>),
     /// `while <condition>` [documented: While].
     While(Vec<XTok>),
     /// `foreach <var> <- <source>` [documented: ForEach]: the tokens after `foreach`.
@@ -92,6 +98,7 @@ fn extender(l: &Line) -> Option<Kw> {
         ("if", Some("eval")) => Some(Kw::IfEval(xtokens(&l.text)[2..].to_vec())),
         ("elseif", Some("eval")) => Some(Kw::ElseIfEval(xtokens(&l.text)[2..].to_vec())),
         ("eval", Some(_)) => Some(Kw::Eval(xtokens(&l.text)[1..].to_vec())),
+        ("testexpr", _) => Some(Kw::TestExpr(xtokens(&l.text)[1..].to_vec())),
         ("while", _) =>Some(Kw::While(xtokens(&l.text)[1..].to_vec())),
         ("foreach", _) => Some(Kw::ForEach(xtokens(&l.text)[1..].to_vec())),
         ("loop", None) => Some(Kw::Loop),
@@ -146,10 +153,11 @@ pub struct Statement {
 }
 
 impl Kw {
-    /// The extender tokens of a `let`, `if eval`, `elseif eval`, `while` or `foreach` line.
+    /// The extender tokens of a `let`, `if eval`, `elseif eval`, `eval`, `testexpr`,
+    /// `while` or `foreach` line.
     fn xtoks_mut(&mut self) -> Option<&mut Vec<XTok>> {
         match self {
-            Kw::Let(t) | Kw::IfEval(t) | Kw::ElseIfEval(t) | Kw::Eval(t) | Kw::While(t) | Kw::ForEach(t) => Some(t),
+            Kw::Let(t) | Kw::IfEval(t) | Kw::ElseIfEval(t) | Kw::Eval(t) | Kw::TestExpr(t) | Kw::While(t) | Kw::ForEach(t) => Some(t),
             _ => None,
         }
     }
@@ -158,7 +166,7 @@ impl Kw {
     /// script-compiler.md §8).
     pub fn extended(&self) -> bool {
         match self {
-            Kw::Let(_) | Kw::IfEval(_) | Kw::ElseIfEval(_) | Kw::Eval(_) | Kw::While(_) | Kw::ForEach(_) | Kw::Loop | Kw::Break | Kw::Continue | Kw::Label(_) | Kw::GoTo(_) => true,
+            Kw::Let(_) | Kw::IfEval(_) | Kw::ElseIfEval(_) | Kw::Eval(_) | Kw::TestExpr(_) | Kw::While(_) | Kw::ForEach(_) | Kw::Loop | Kw::Break | Kw::Continue | Kw::Label(_) | Kw::GoTo(_) => true,
             Kw::Decl { ty, init, .. } => matches!(ty, DeclType::String | DeclType::Array) || init.is_some(),
             // `Begin _GameMode`: a compiler-override block [documented: Script Compiler Override].
             Kw::Begin { block, .. } => block.starts_with('_') || block.eq_ignore_ascii_case("function"),
@@ -306,5 +314,15 @@ mod tests {
     fn set_needs_to() {
         let l = lines("set a 5", &mut Vec::new());
         assert!(statement(&l[0]).is_err());
+    }
+
+    #[test]
+    fn testexpr_keeps_one_expression_and_its_declaration() {
+        let l = lines("testexpr Coordinates := Ar_List gridX, gridY\ntestexpr array_var aCoordsIn = Call SDGetRefCellCoordinates rActorLocation", &mut Vec::new());
+        let first = statement(&l[0]).unwrap();
+        assert!(matches!(&first.kw, Kw::TestExpr(t) if t[0].text == "Coordinates" && t.iter().any(|t| t.is(XKind::Op, ":="))));
+        let second = statement(&l[1]).unwrap();
+        assert_eq!(second.decls, [(DeclType::Array, "aCoordsIn".to_string())]);
+        assert!(matches!(&second.kw, Kw::TestExpr(t) if t[0].text == "aCoordsIn"));
     }
 }

@@ -1083,7 +1083,7 @@ impl<'a> Gen<'a> {
         // GECK's "Mismatched quotes", ext-bytecode.md §7]; a vanilla line's unclosed string
         // runs to the end of the line.
         let x_line = self.co
-            || matches!(kw, Kw::Let(_) | Kw::IfEval(_) | Kw::ElseIfEval(_) | Kw::Eval(_) | Kw::While(_) | Kw::ForEach(_))
+            || matches!(kw, Kw::Let(_) | Kw::IfEval(_) | Kw::ElseIfEval(_) | Kw::Eval(_) | Kw::TestExpr(_) | Kw::While(_) | Kw::ForEach(_))
             || matches!(kw, Kw::Call(toks) if self.x_call_line(toks));
         if x_line && lex::unclosed_quote(&self.text) {
             self.diag("mismatched_quotes", true, self.text.clone());
@@ -1323,6 +1323,19 @@ impl<'a> Gen<'a> {
                 let Some(e) = self.xwhole(toks) else { return };
                 let json = serde_json::to_vec(&e).unwrap_or_default();
                 self.emit(None, if matches!(e, crate::ir::XExpr::Assign { .. }) { op::X_LET } else { op::X_EVAL }, &json);
+            }
+            // `testexpr <expression>`: the expression is run for what it does (an
+            // assignment included) and TestExpr's 0/1 is dropped [documented: TestExpr;
+            // observed: SD_RadiantInfinium.esp ships `testexpr Coordinates := Ar_List
+            // gridX, gridY` and `testexpr array_var aCoordsIn = Call …` with compiled
+            // bytes holding a TestExpr call of the whole expression].
+            Kw::TestExpr(toks) => {
+                let Some(e) = self.xwhole(toks) else { return };
+                let call = crate::ir::XExpr::Call {
+                    call: crate::ir::XCall { on: None, func: crate::ir::FuncId::Name("TestExpr".into()), args: vec![e] },
+                };
+                let json = serde_json::to_vec(&call).unwrap_or_default();
+                self.emit(None, op::X_EVAL, &json);
             }
             Kw::Let(toks) => {
                 let Some(e) = self.xwhole(toks) else { return };
