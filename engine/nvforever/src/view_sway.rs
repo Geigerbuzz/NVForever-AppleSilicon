@@ -70,12 +70,13 @@ pub const REST_CHASE_SECONDS: f32 = CHASE_SECONDS;
 
 /// B42 Inertia's own numbers, mapped onto this module's constants (`weapon_feel.rs`):
 /// `fIntensityMultVertical` → [`SwayTuning::intensity_v`], `fIntensityMultHorizontal` →
-/// [`SwayTuning::intensity_h`], and the two rates onto the lag's time constant — `5` and
-/// `1` are the mod's own defaults, so with its shipped values every field here equals the
+/// [`SwayTuning::intensity_h`], and the rates onto the lag's time constant — `5` and `1`
+/// are the mod's own defaults, so with its shipped values every field here equals the
 /// engine's constants above and the pose is bit-identical.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SwayTuning {
-    /// Multiplies the turn lag's pitch (`fIntensityMultVertical`).
+    /// Multiplies the turn lag's pitch (`fIntensityMultVertical`; negative inverts the
+    /// movement, which the mod's own comment says is the point of allowing it).
     pub intensity_v: f32,
     /// Multiplies the turn lag's heading (`fIntensityMultHorizontal`).
     pub intensity_h: f32,
@@ -84,7 +85,31 @@ pub struct SwayTuning {
     /// The lag's time constant while the view holds still (`fCenteringSpeed`: 1 →
     /// [`REST_CHASE_SECONDS`]).
     pub rest_chase: f32,
+    /// Scales [`FADE_SECONDS`] — how fast the view comes back when the sway goes away
+    /// (the Pip-Boy opening): the mod's `fRecenterSpeed`, 0.2 shipping, is 1 here.
+    pub recenter: f32,
+    /// Which point the turn is about (`bRotationMode`).
+    pub pivot: Pivot,
 }
+
+/// Which point the arms' turn is about (B42 Inertia's `bRotationMode`; its MCM names the
+/// two settings `Rear` and `Center` [observed: `MCM/B42Inertia.json`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pivot {
+    /// 0 — "the original rotation": about the eye, so the muzzle swings the most. The
+    /// engine's own pose.
+    #[default]
+    Rear,
+    /// 1 — "the new rotation": about a point ahead of the eye where the weapon's body is
+    /// ([`PIVOT_AHEAD`]), so the sight end stays put and the grip swings.
+    Centre,
+}
+
+/// How far ahead of the eye the weapon's centre is, for [`Pivot::Centre`] (units in the
+/// view's frame) [design: about where the gun is held and its own length — `weapon_lower`
+/// puts the hands 8 down and 5 right of the eye, and a first-person gun reaches a few
+/// units further; the mod ships no distance].
+pub const PIVOT_AHEAD: f32 = 16.0;
 
 impl SwayTuning {
     /// The mod's own `fSpeedMult` and `fCenteringSpeed` as time constants: the mod's
@@ -94,11 +119,21 @@ impl SwayTuning {
         let rate = |v: f32, reference: f32| if v.is_finite() && v > 0.0 { (reference / v).clamp(0.01, 2.0) } else { 1.0 };
         SwayTuning { turn_chase: CHASE_SECONDS * rate(speed_mult, 5.0), rest_chase: CHASE_SECONDS * rate(centering_speed, 1.0), ..SwayTuning::default() }
     }
+
+    /// `fRecenterSpeed` (0.2 shipping) as a scale on [`FADE_SECONDS`]: a bigger number
+    /// comes back to the view sooner.
+    pub fn recenter_from(speed: f32) -> f32 {
+        if speed.is_finite() && speed > 0.0 {
+            (0.2 / speed).clamp(0.05, 20.0)
+        } else {
+            1.0
+        }
+    }
 }
 
 impl Default for SwayTuning {
     fn default() -> Self {
-        SwayTuning { intensity_v: 1.0, intensity_h: 1.0, turn_chase: CHASE_SECONDS, rest_chase: REST_CHASE_SECONDS }
+        SwayTuning { intensity_v: 1.0, intensity_h: 1.0, turn_chase: CHASE_SECONDS, rest_chase: REST_CHASE_SECONDS, recenter: 1.0, pivot: Pivot::Rear }
     }
 }
 
@@ -169,7 +204,9 @@ impl ViewSway {
     pub fn update(&mut self, i: SwayInput) -> SwayPose {
         let dt = i.dt.max(0.0);
         let follow = |t: f32| if dt <= 0.0 { 0.0 } else { 1.0 - (-dt / t).exp() };
-        self.gain += (f32::from(u8::from(i.on)) - self.gain) * follow(FADE_SECONDS);
+        // The fade out (Pip-Boy, an idle) is B42 Inertia's `fRecenterSpeed`'s: how fast the
+        // view comes back rather than snapping.
+        self.gain += (f32::from(u8::from(i.on)) - self.gain) * follow(FADE_SECONDS * self.tuning.recenter);
         // Turn lag: the view turned by `d`, the arms not yet; they then close the gap.
         // A jump of the view (a teleport, an idle letting go) starts afresh.
         let mut turned = false;
@@ -213,7 +250,18 @@ impl ViewSway {
         let offset = Vec3::new(BOB_SWAY * swing * bob_share - behind.x * sway_share, -behind.y * sway_share, dip);
         self.peak_lag = self.peak_lag.max(lag.abs());
         self.peak_dip = self.peak_dip.max(-dip);
-        SwayPose { rotation: turn * Quat::from_rotation_y(roll), offset }
+        let rotation = turn * Quat::from_rotation_y(roll);
+        // The mod's rotation mode: about the eye (the muzzle swings) or about the point
+        // ahead where the weapon's body is (the sight end stays put). Turning about `p`
+        // is `v → R v + (p − R p)`.
+        let offset = match t.pivot {
+            Pivot::Rear => offset,
+            Pivot::Centre => {
+                let p = Vec3::Y * PIVOT_AHEAD;
+                offset + p - rotation * p
+            }
+        };
+        SwayPose { rotation, offset }
     }
 }
 
@@ -394,7 +442,7 @@ mod tests {
     fn a_faster_centering_speed_comes_back_to_centre_sooner() {
         // `fCenteringSpeed` 4 instead of 1: the same flick is gone four times as fast.
         let mut slow = ViewSway::default();
-        let mut quick = ViewSway { tuning: SwayTuning::from_rates(5.0, 4.0), ..ViewSway::default() };
+        let mut quick = ViewSway { tuning: SwayTuning { rest_chase: REST_CHASE_SECONDS / 4.0, ..SwayTuning::default() }, ..ViewSway::default() };
         for s in [&mut slow, &mut quick] {
             settle(s, input(0.0, Vec2::ZERO, 0.0), 60);
             s.update(input(0.2, Vec2::ZERO, 0.0));
@@ -405,5 +453,44 @@ mod tests {
         }
         assert!(quick.lag.x.abs() < slow.lag.x.abs() * 0.7, "{} {}", quick.lag.x, slow.lag.x);
         assert!(quick.lag.x.abs() <= 0.2 + 1e-6, "no overshoot: {}", quick.lag.x);
+    }
+
+    #[test]
+    fn the_recenter_speed_is_the_mods_and_scales_the_fade() {
+        // The installed file's 0.2 is the engine's fade exactly; 2 comes back ten times sooner.
+        assert_eq!(SwayTuning::recenter_from(0.2), 1.0);
+        assert!((SwayTuning::recenter_from(2.0) - 0.1).abs() < 1e-6);
+        let v = Vec2::new(0.0, 300.0);
+        let mut plain = ViewSway::default();
+        let mut quick = ViewSway { tuning: SwayTuning { recenter: 0.1, ..SwayTuning::default() }, ..ViewSway::default() };
+        for s in [&mut plain, &mut quick] {
+            settle(s, input(0.0, v, FOOTFALL_PHASE), 120);
+            s.update(SwayInput { on: false, ..input(0.0, v, FOOTFALL_PHASE) });
+        }
+        for _ in 0..3 {
+            plain.update(SwayInput { on: false, ..input(0.0, v, FOOTFALL_PHASE) });
+            quick.update(SwayInput { on: false, ..input(0.0, v, FOOTFALL_PHASE) });
+        }
+        // A tenth of the fade time leaves much less behind: read through the bob's dip.
+        let a = plain.update(SwayInput { on: false, ..input(0.0, v, FOOTFALL_PHASE) }).offset.z;
+        let b = quick.update(SwayInput { on: false, ..input(0.0, v, FOOTFALL_PHASE) }).offset.z;
+        assert!(a.abs() > 1e-3, "the plain fade still shows: {a}");
+        assert!(b.abs() < a.abs() * 0.2, "{a} {b}");
+    }
+
+    #[test]
+    fn the_centre_pivot_keeps_the_weapons_centre_still_and_the_rear_pivot_the_eye() {
+        let mut rear = ViewSway::default();
+        let mut centre = ViewSway { tuning: SwayTuning { pivot: Pivot::Centre, ..SwayTuning::default() }, ..ViewSway::default() };
+        let p = turn(&mut rear, 0.05, 200);
+        let q = turn(&mut centre, 0.05, 200);
+        assert!(q.rotation.angle_between(p.rotation) < 1e-6, "the same turn either way");
+        // About the eye: nothing at the eye moves. About the weapon's centre: the point
+        // PIVOT_AHEAD ahead stays put instead, so the whole gun swings the other way.
+        assert_eq!(p.offset, Vec3::ZERO);
+        let c = Vec3::Y * PIVOT_AHEAD;
+        let moved = q.rotation * c + q.offset;
+        assert!((moved - c).length() < 1e-4, "the centre stays: {moved:?} against {c:?}");
+        assert!(q.offset.length() > 1e-3, "and the gun itself moves: {:?}", q.offset);
     }
 }

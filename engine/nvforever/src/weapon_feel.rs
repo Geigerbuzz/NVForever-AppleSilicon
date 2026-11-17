@@ -11,23 +11,23 @@
 //!
 //! | Mod | File we read | Keys | Where they go |
 //! |---|---|---|---|
-//! | B42 Inertia | `Config/B42Inertia.ini`, `[Tuning]` | `fIntensityMultVertical`, `fIntensityMultHorizontal` | [`SwayTuning::intensity_v`] / [`SwayTuning::intensity_h`] |
+//! | B42 Inertia | `Config/B42Inertia.ini`, `[Tuning]` (all six keys, [observed: the installed file]) | `fIntensityMultVertical`, `fIntensityMultHorizontal` (negative inverts the movement, as its own comment says) | [`SwayTuning::intensity_v`] / [`SwayTuning::intensity_h`] |
 //! | | | `fSpeedMult`, `fCenteringSpeed` | the turn lag's time constant while turning / while still ([`SwayTuning::from_rates`]) |
-//! | | | `bRotationMode` | **no counterpart**: recorded, not applied |
+//! | | | `fRecenterSpeed` | [`SwayTuning::recenter`]: the rate the view comes back at when the sway goes away (the Pip-Boy) |
+//! | | | `bRotationMode` | [`SwayTuning::pivot`]: `0` the original rotation about the eye ([`crate::view_sway::Pivot::Rear`]), `1` the new one about the weapon's centre ([`crate::view_sway::Pivot::Centre`]) |
 //! | Viewmodel Recoil | `Config/ProfilesVRecoil/Default.ini` | `[General]` intensities, limits and the two damage coefficients; `[Ironsights]` limit multiplier and constant coefficient; `[Individual] vUseIndividualRecoil`; `[Randomization] vIsRandomized` | [`fnv_combat::pattern::RecoilProfile`], which scales the per-weapon patterns |
 //! | | `Config/WeaponVRecoil/<EDID>.ini`, `[PATTERN]` | `X`, `Y`, `dX`, `dY`, `cIS` (and `Z`, `dZ`, which are read but unused) | the view kick of a shot of that weapon |
 //! | FPS Weapon Lowering | `config/FPS WL/FPSWL Config.ini`, `[SETTINGS]` | `iWLMode` (0 hotkey, 1 automatic, 2 complex) | whether the sprint/idle state lowers the weapon at all; the mod ships **no** offset numbers, so the pose and shares below are ours |
 //! | Smooth True Ironsights | `NVSE/Plugins/Tweaks/MenuConfig/SmoothTrueIronsights.json` | — | nothing: the file ships settings sliders (min/max) and **no default values** |
 //!
-//! **What has no counterpart, stated rather than guessed.** B42's `bRotationMode` picks
-//! how the mod rotates the viewmodel; this module's pose always turns the arms about the
-//! eye, which is neither of the pivots the design note names ("rear", "centre"), so the
-//! key is read and printed, never applied (and no pivot key name is invented: the real
-//! file is not on this machine to read one from). Viewmodel Recoil's `Z`/`dZ` (rotation)
-//! have no axis to move — the view is heading and pitch only. Its `[Stats]` block
-//! (`vStrengthCoeffV`, `vWeightInfluenceV`, `vUseAmmoPseudoCalc` …) has no viewmodel mass
-//! model to act on and is parsed-but-unused. `iWLKey`/`iWLSound` are the mod's own key and
-//! sound, which the engine already has its own of (Lower Weapon, H).
+//! **What has no counterpart, stated rather than guessed.** All six B42 Inertia keys are
+//! applied; the one number of ours in that mapping is how far ahead the weapon's centre
+//! sits for [`crate::view_sway::Pivot::Centre`] (`PIVOT_AHEAD`), which the mod does not
+//! ship. Viewmodel Recoil's `Z`/`dZ` (rotation) have no axis to move — the view is heading
+//! and pitch only. Its `[Stats]` block (`vStrengthCoeffV`, `vWeightInfluenceV`,
+//! `vUseAmmoPseudoCalc` …) has no viewmodel mass model to act on and is parsed-but-unused.
+//! `iWLKey`/`iWLSound` are the mod's own key and sound, which the engine already has its
+//! own of (Lower Weapon, H).
 //!
 //! **Where the files are read from**: through the run's own `Vfs` (`nvf_assets::GameData`),
 //! so a config file is read from the same overlay as an asset and the overlay's precedence
@@ -169,20 +169,32 @@ impl WeaponFeel {
             return;
         };
         let ini = Ini::parse(&text);
+        // The installed file's keys and comments [observed: mods/B42Inertia/Config/B42Inertia.ini]:
+        // the multipliers "should move compared to your own view" and may be **negative** to
+        // invert the movement; `fSpeedMult` is "how fast the weapon reacts to movement
+        // changes"; `fCenteringSpeed` is "how fast the weapon returns to being centered"
+        // (the mod's author adds that they are not sure beyond "another speed multiplier");
+        // `fRecenterSpeed` is "how fast the view should return to normal when opening the
+        // Pip-Boy"; `bRotationMode` is the pivot, 0 "the original rotation", 1 "around the
+        // center of the weapon" (its MCM names them Rear and Center).
         let v = ini.f32("tuning", "fintensitymultvertical");
         let h = ini.f32("tuning", "fintensitymulthorizontal");
         let speed = ini.f32("tuning", "fspeedmult");
         let centering = ini.f32("tuning", "fcenteringspeed");
+        let recenter = ini.f32("tuning", "frecenterspeed");
+        let mode = ini.f32("tuning", "brotationmode");
         let mut tuning = SwayTuning::from_rates(speed.unwrap_or(5.0), centering.unwrap_or(1.0));
-        tuning.intensity_v = v.filter(|v| *v >= 0.0).unwrap_or(1.0);
-        tuning.intensity_h = h.filter(|v| *v >= 0.0).unwrap_or(1.0);
+        tuning.intensity_v = v.unwrap_or(1.0);
+        tuning.intensity_h = h.unwrap_or(1.0);
+        tuning.recenter = SwayTuning::recenter_from(recenter.unwrap_or(0.2));
+        tuning.pivot = if mode.is_some_and(|m| m >= 0.5) { crate::view_sway::Pivot::Centre } else { crate::view_sway::Pivot::Rear };
         self.sway = tuning;
         let gone = |name: &str, v: Option<f32>| match v {
             Some(v) => format!("{name} {v}"),
             None => format!("{name} missing"),
         };
         let mut line = format!(
-            "B42 Inertia {path}: {v} → vertical ×{iv:.2}, {h} → horizontal ×{ih:.2}, {s} → turn lag {tc:.3} s, {c} → rest lag {rc:.3} s",
+            "B42 Inertia {path}: {v} → vertical ×{iv:.2}, {h} → horizontal ×{ih:.2}, {s} → turn lag {tc:.3} s, {c} → rest lag {rc:.3} s, {r} → recenter {rcn:.3}, {m} → {pivot:?} pivot",
             path = path,
             v = gone("fIntensityMultVertical", v),
             iv = tuning.intensity_v,
@@ -191,17 +203,25 @@ impl WeaponFeel {
             s = gone("fSpeedMult", speed),
             tc = tuning.turn_chase,
             c = gone("fCenteringSpeed", centering),
-            rc = tuning.rest_chase
+            rc = tuning.rest_chase,
+            r = gone("fRecenterSpeed", recenter),
+            rcn = tuning.recenter,
+            m = gone("bRotationMode", mode),
+            pivot = tuning.pivot,
         );
-        // Keys with no counterpart, named: rotation mode and whichever pivot key the file
-        // has, so a future session can map them from the mod's own description.
+        // Keys the mod may add that this reader does not know: named, not guessed at.
         let unmapped: Vec<String> = ini
             .keys("tuning")
             .into_iter()
-            .filter(|k| !matches!(k.as_str(), "fintensitymultvertical" | "fintensitymulthorizontal" | "fspeedmult" | "fcenteringspeed"))
+            .filter(|k| {
+                !matches!(
+                    k.as_str(),
+                    "fintensitymultvertical" | "fintensitymulthorizontal" | "fspeedmult" | "fcenteringspeed" | "frecenterspeed" | "brotationmode"
+                )
+            })
             .collect();
         if !unmapped.is_empty() {
-            line.push_str(&format!("; no counterpart, not applied: {}", unmapped.join(", ")));
+            line.push_str(&format!("; unread keys: {}", unmapped.join(", ")));
         }
         self.report.push(line);
     }
@@ -267,7 +287,9 @@ impl WeaponFeel {
             self.lowering.and_then(|l| l.sound),
         ));
         match read_first(vfs, FPS_LOWERING_JSON) {
-            Some((p, _)) => self.report.push(format!("FPS Weapon Lowering: {p} has offset numbers: read, but the pose still uses ours (it is a clip list here)")),
+            Some((p, _)) => self.report.push(format!(
+                "FPS Weapon Lowering: {p} is a kNVSE AnimGroupOverride clip list with script conditions (the mod's own `bFPSLowering == 2` and `HasPerk QuickDraw == 0`), no numbers: nothing to read, the pose is ours"
+            )),
             None => self.report.push("FPS Weapon Lowering: no AnimGroupOverride JSON in the overlay (the mod lowers by playing clips we do not have), so the pose is ours".into()),
         }
     }
@@ -363,10 +385,12 @@ mod tests {
         fnv_vfs::Vfs::open(&dir, &[]).unwrap()
     }
 
-    const B42: &str = "[Tuning]\nfIntensityMultVertical=0.6\nfIntensityMultHorizontal=0.4\nfCenteringSpeed=1\nfSpeedMult=5\nbRotationMode=1\nsPivot=rear\n";
+    /// The keys and values `mods/B42Inertia/Config/B42Inertia.ini` ships [observed: the
+    /// installed file]; its prose stays in the mod.
+    const B42: &str = "[Tuning]\nfIntensityMultVertical = 0.6\nfIntensityMultHorizontal = 0.4\nfCenteringSpeed = 1\nfSpeedMult = 5\nfRecenterSpeed = 0.2\nbRotationMode = 1\n";
 
     #[test]
-    fn b42_inertia_maps_its_numbers_onto_the_sway() {
+    fn b42_inertia_maps_all_six_of_its_numbers_onto_the_sway() {
         let vfs = overlay("b42", &[("Config/B42Inertia.ini", B42)]);
         let feel = WeaponFeel::load(&vfs, true);
         assert!((feel.sway.intensity_v - 0.6).abs() < 1e-6);
@@ -374,9 +398,21 @@ mod tests {
         // The mod's own defaults (5, 1) are the engine's constants exactly.
         assert!((feel.sway.turn_chase - SwayTuning::default().turn_chase).abs() < 1e-6);
         assert!((feel.sway.rest_chase - SwayTuning::default().rest_chase).abs() < 1e-6);
+        // fRecenterSpeed 0.2 is the engine's fade; bRotationMode 1 is the centre pivot.
+        assert_eq!(feel.sway.recenter, 1.0);
+        assert_eq!(feel.sway.pivot, crate::view_sway::Pivot::Centre);
         let line = feel.report.iter().find(|l| l.starts_with("B42 Inertia")).unwrap();
-        assert!(line.contains("brotationmode"), "the unmapped keys are named: {line}");
-        assert!(line.contains("spivot"), "{line}");
+        assert!(line.contains("fRecenterSpeed 0.2 → recenter"), "{line}");
+        assert!(line.contains("bRotationMode 1 → Centre pivot"), "{line}");
+        assert!(!line.contains("unread keys"), "every key the file ships is read: {line}");
+    }
+
+    #[test]
+    fn b42_inertias_rotation_mode_zero_is_the_rear_pivot_and_negative_multipliers_invert() {
+        let v = overlay("b42rear", &[("Config/B42Inertia.ini", "[Tuning]\nbRotationMode=0\nfIntensityMultVertical=-0.6\n")]);
+        let feel = WeaponFeel::load(&v, true);
+        assert_eq!(feel.sway.pivot, crate::view_sway::Pivot::Rear, "0 is the original rotation, about the eye");
+        assert_eq!(feel.sway.intensity_v, -0.6, "the mod's comment says a negative number inverts the movement");
     }
 
     #[test]
@@ -392,9 +428,9 @@ mod tests {
 
     #[test]
     fn a_bad_value_leaves_the_engines_constant_and_says_so() {
-        let vfs = overlay("b42bad", &[("Config/B42Inertia.ini", "[Tuning]\nfIntensityMultVertical=-3\nfIntensityMultHorizontal=nonsense\nfSpeedMult=0\n")]);
+        let vfs = overlay("b42bad", &[("Config/B42Inertia.ini", "[Tuning]\nfIntensityMultHorizontal=nonsense\nfSpeedMult=0\nfRecenterSpeed=-1\n")]);
         let feel = WeaponFeel::load(&vfs, true);
-        assert_eq!(feel.sway, SwayTuning::default(), "a negative intensity, an unreadable one and a zero rate are all refused");
+        assert_eq!(feel.sway, SwayTuning::default(), "an unreadable intensity, a zero rate and a negative recenter are all refused");
         assert!(feel.report.iter().any(|l| l.contains("fIntensityMultHorizontal missing")), "{:?}", feel.report);
     }
 
@@ -487,6 +523,50 @@ mod tests {
         assert!(!off.enabled);
         assert!((off.sway.intensity_v - 0.6).abs() < 1e-6, "the numbers are still read");
         assert!(off.report.iter().any(|l| l.contains("the switch is off")), "{:?}", off.report);
+    }
+
+    #[test]
+    fn the_mods_layer_is_read_through_the_vfs_in_precedence_order() {
+        // The production shape: `Data/` and `mods/<Mod>/Config/…`, indexed by the run's
+        // own VFS. Two mods have the file; the later folder wins, and `mods.txt` can put
+        // the other on top.
+        let root = std::env::temp_dir().join(format!("nvf-weapon-feel-layer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (data, mods) = (root.join("Data"), root.join("mods"));
+        std::fs::create_dir_all(&data).unwrap();
+        for (mod_name, value) in [("Alpha", "0.1"), ("Bravo", "0.9")] {
+            let p = mods.join(mod_name).join("Config/B42Inertia.ini");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, format!("[Tuning]\nfIntensityMultVertical={value}\n")).unwrap();
+        }
+        let vfs = fnv_vfs::Vfs::open_for_plugins_in(&data, Some(&mods), &["FalloutNV.esm"]).unwrap();
+        assert!((WeaponFeel::load(&vfs, true).sway.intensity_v - 0.9).abs() < 1e-6, "the later folder wins");
+        std::fs::write(mods.join("mods.txt"), "Alpha\n").unwrap();
+        let vfs = fnv_vfs::Vfs::open_for_plugins_in(&data, Some(&mods), &["FalloutNV.esm"]).unwrap();
+        assert!((WeaponFeel::load(&vfs, true).sway.intensity_v - 0.1).abs() < 1e-6, "mods.txt's top line wins");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The real thing: point `NVF_WEAPON_FEEL_MODS` at an installed mods folder (or a copy
+    /// of it) and the loader reads those files, printing what it read. A check with the
+    /// game's own data, not a fixture: `cargo test -- --ignored --nocapture reads_installed`.
+    #[test]
+    #[ignore = "needs the installed overlay in NVF_WEAPON_FEEL_MODS"]
+    fn reads_the_installed_overlay() {
+        let Ok(mods) = std::env::var("NVF_WEAPON_FEEL_MODS") else {
+            panic!("set NVF_WEAPON_FEEL_MODS to the mods folder (or a copy of it)");
+        };
+        let mods = std::path::PathBuf::from(mods);
+        let data = std::env::temp_dir().join(format!("nvf-weapon-feel-nodata-{}", std::process::id()));
+        let vfs = fnv_vfs::Vfs::open_for_plugins_in(&data, Some(&mods), &["FalloutNV.esm"]).expect("a vfs over the overlay");
+        let feel = WeaponFeel::load(&vfs, true);
+        for line in &feel.report {
+            println!("weapon feel: {line}");
+        }
+        let b42 = feel.report.iter().find(|l| l.starts_with("B42 Inertia ")).expect("a B42 line");
+        assert!(!b42.contains("no Config/B42Inertia.ini"), "the installed file is read: {b42}");
+        assert!(feel.recoil.as_ref().is_some_and(|p| !p.patterns.is_empty()), "the weapon patterns are read");
+        assert!(feel.lowering.is_some(), "the lowering INI is read");
     }
 
     /// The per-frame cost of the whole feature, and the one-off cost of reading the files:
