@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::damage::apply_effects;
 use crate::data::{AmmoEffect, WeaponStats};
+use crate::pattern::RecoilProfile;
 use crate::tuning::{CombatTuning, Rules};
 
 /// The shooter's situation for the actor-spread part.
@@ -172,6 +173,14 @@ impl Kick {
     /// `rnd` gives uniform numbers in [0, 1). Returns the view kick for this shot (added
     /// to the view).
     pub fn shot(&mut self, t: &CombatTuning, w: &WeaponStats, interval: f32, rnd: &mut impl FnMut() -> f32) -> ViewKick {
+        self.shot_with(t, w, interval, None, false, rnd)
+    }
+
+    /// [`Kick::shot`] with Viewmodel Recoil's own pattern, when the weapon has one: the
+    /// impulse is the pattern's ([`crate::pattern::RecoilProfile::kick`]); a weapon with no
+    /// pattern gets [`Kick::shot`]'s own recoil, unchanged. `aiming` scales the pattern down
+    /// the sights, as the mod's `cIS` does.
+    pub fn shot_with(&mut self, t: &CombatTuning, w: &WeaponStats, interval: f32, profile: Option<&RecoilProfile>, aiming: bool, rnd: &mut impl FnMut() -> f32) -> ViewKick {
         let auto = |m: f32| if w.automatic { m } else { 1.0 };
         if self.since_shot >= self.settle_after {
             self.burst = 0;
@@ -188,9 +197,15 @@ impl Kick {
         } else if flip < t.recoil_lean_flip {
             self.lean = -self.lean;
         }
-        let up = (t.recoil_base_deg + t.recoil_per_damage_deg * w.base_damage.max(0) as f32) * auto(t.recoil_auto_mult);
-        let pitch = up * (1.0 + t.recoil_jitter * (2.0 * rnd() - 1.0));
-        let yaw = up * t.recoil_side_share * (0.6 * self.lean + 0.4 * (2.0 * rnd() - 1.0));
+        let (pitch, yaw) = match profile.and_then(|p| p.kick(w.edid.as_deref(), w.base_damage.max(0) as f32, aiming, rnd)) {
+            Some(k) => (k.pitch_deg, k.yaw_deg),
+            None => {
+                let up = (t.recoil_base_deg + t.recoil_per_damage_deg * w.base_damage.max(0) as f32) * auto(t.recoil_auto_mult);
+                let pitch = up * (1.0 + t.recoil_jitter * (2.0 * rnd() - 1.0));
+                let yaw = up * t.recoil_side_share * (0.6 * self.lean + 0.4 * (2.0 * rnd() - 1.0));
+                (pitch, yaw)
+            }
+        };
         self.climb_deg += pitch;
         self.climb_yaw_deg += yaw;
         self.since_shot = 0.0;

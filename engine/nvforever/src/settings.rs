@@ -245,6 +245,21 @@ pub fn register(app: &mut App) {
                 slider: None,
             },
         );
+        if app.world().contains_resource::<crate::weapon_feel::WeaponFeel>() {
+            add_setting(
+                app,
+                Setting {
+                    key: "weapon-feel",
+                    group: GROUP_MENUS,
+                    label: "Mod weapon feel",
+                    note: "On: the installed weapon mods' own numbers drive the gun — B42 Inertia's sway, Viewmodel Recoil's per-weapon patterns, and the lowering mod's running and idle state. Off: the engine's own tuning.",
+                    switches: crate::weapon_feel::SWITCH,
+                    get: |w| w.resource::<crate::weapon_feel::WeaponFeel>().enabled,
+                    set: |w, on| w.resource_mut::<crate::weapon_feel::WeaponFeel>().enabled = on,
+                    slider: None,
+                },
+            );
+        }
         add_setting(
             app,
             Setting {

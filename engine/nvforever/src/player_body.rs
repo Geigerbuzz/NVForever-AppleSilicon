@@ -815,6 +815,9 @@ struct Motion {
     head: crate::head_bob::HeadBob,
     /// The first-person weapon lowered against a wall or a friend (`weapon_lower.rs`).
     lower: WeaponLower,
+    /// Seconds the player has stood still with nothing in hand being used: FPS Weapon
+    /// Lowering's idle state (`weapon_feel.rs`).
+    idle: f32,
     /// The true iron sights were last reported on the eye (a smoke check).
     sights_told: bool,
     /// The weapon was last reported lowered (a smoke check).
@@ -868,6 +871,7 @@ impl Default for Motion {
             sway: ViewSway::default(),
             head: crate::head_bob::HeadBob::default(),
             lower: WeaponLower::default(),
+            idle: 0.0,
             sights_told: false,
             lower_told: false,
             sights_share: 0.0,
@@ -2490,7 +2494,16 @@ fn drive_weapon_emitters(state: Res<PlayerBody>, mut emitters: Query<&mut crate:
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn drive_body(
     mut commands: Commands,
-    (time, turbo, sim, mut told_scale, sequences): (Res<Time>, Option<Res<nvf_play::script::PlayerTimeScale>>, Option<Res<nvf_play::sim::SimState>>, Local<Option<f32>>, Res<crate::script_sequences::PlayerSequences>),
+    (time, turbo, sim, mut told_scale, sequences, feel): (
+        Res<Time>,
+        Option<Res<nvf_play::script::PlayerTimeScale>>,
+        Option<Res<nvf_play::sim::SimState>>,
+        Local<Option<f32>>,
+        Res<crate::script_sequences::PlayerSequences>,
+        // The mods' own weapon-feel numbers (`weapon_feel.rs`, `--weapon-feel`): B42
+        // Inertia's sway tuning and FPS Weapon Lowering's state.
+        Option<Res<crate::weapon_feel::WeaponFeel>>,
+    ),
     d: Res<PlayWorld>,
     intent: Res<MoveIntent>,
     control: Res<PlayerControl>,
@@ -2863,6 +2876,11 @@ fn drive_body(
     }
     let pipboy = (pip.on_arm() && pip.warming.is_none()).then_some(pip.clip_time);
     // The arms sway in first person by themselves: not under the Pip-Boy or an idle.
+    // The installed B42 Inertia file's numbers, when `--weapon-feel` is on; the engine's
+    // constants otherwise (`view_sway::SwayTuning`).
+    if let Some(f) = feel.as_deref() {
+        m.sway.tuning = if f.enabled { f.sway } else { crate::view_sway::SwayTuning::default() };
+    }
     let sway = body.first.as_ref().map_or(SwayPose::NONE, |f| {
         m.sway.update(SwayInput {
             dt,
@@ -2892,13 +2910,23 @@ fn drive_body(
         at = [at[0] + o.x, at[1] + o.y, at[2] + o.z];
     }
     // Lowered against a wall or a friend ahead (`weapon_lower.rs`): a drawn weapon, not
-    // fists; aiming, the trigger, an attack or a reload bring it up.
+    // fists; aiming, the trigger, an attack or a reload bring it up. FPS Weapon Lowering's
+    // own state adds a share of its own for running and standing idle, when its file was
+    // found and `--weapon-feel` is on.
+    let busy = control.aiming || control.trigger || attack_now || reload_now;
+    let parked = busy || m.speed > 5.0;
+    m.idle = if parked { 0.0 } else { m.idle + dt };
+    let state_share = match (feel.as_deref(), state.weapon_lower) {
+        (Some(f), true) if f.enabled => f.lowering.map_or(0.0, |l| l.state_share(m.speed, stance == Stance::Sneak, busy, m.idle)),
+        _ => 0.0,
+    };
     let lowered = m.lower.update(LowerInput {
         dt,
         // The switch is for the automatic lowering; by hand works either way.
         wall: ahead.wall.filter(|_| state.weapon_lower),
         friendly: ahead.friendly && state.weapon_lower,
         by_hand: control.lowered,
+        state_share,
         up_for: if reload_now {
             reload_len
         } else if control.aiming || control.trigger || attack_now {

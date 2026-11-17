@@ -1178,6 +1178,10 @@ pub struct Combat {
     pub debris: Vec<ObjectDebris>,
     cycle: Option<Cycle>,
     kick: Kick,
+    /// Viewmodel Recoil's own patterns and profile, when the mod's files were found and the
+    /// `--weapon-feel` switch is on (`nvforever`'s `weapon_feel.rs` writes it): a weapon with
+    /// a pattern file kicks by it, every other weapon keeps [`Kick::shot`].
+    pub view_recoil: Option<fnv_combat::pattern::RecoilProfile>,
     flying: Vec<Flying>,
     /// Actors whose next shot is a live grenade dropped as they died (the player's NPCs
     /// Drop Live Grenades tweak, `death_drops`): it leaves at [`LIVE_DROP_SPEED`] of its
@@ -2371,6 +2375,7 @@ fn init_combat(mut commands: Commands, d: Res<PlayWorld>) {
         debris: Vec::new(),
         cycle: None,
         kick: Kick::default(),
+        view_recoil: None,
         flying: Vec::new(),
         dropped_live: Vec::new(),
         settled: Vec::new(),
@@ -3611,7 +3616,11 @@ pub(crate) fn fire(
                 // throw (a grenade has no recoil).
                 if vats_shot.is_none() && !c.no_spread && !c.self_ammo {
                     let rng = &mut c.kick_rng;
-                    let kick = c.kick.shot(&c.tuning, &w, cycle.timing.interval, &mut || rng.next_f32());
+                    // Viewmodel Recoil's own pattern for this weapon, with the mod's
+                    // profile scaling it (`weapon_feel.rs`, `--weapon-feel`); no profile or
+                    // no file for the weapon leaves the engine's recoil exactly as it was.
+                    let recoil = c.view_recoil.as_ref();
+                    let kick = c.kick.shot_with(&c.tuning, &w, cycle.timing.interval, recoil, control.aiming, &mut || rng.next_f32());
                     player.pitch = (player.pitch + kick.pitch_deg.to_radians()).clamp(-MAX_PITCH, MAX_PITCH);
                     player.heading += kick.yaw_deg.to_radians();
                     info!(

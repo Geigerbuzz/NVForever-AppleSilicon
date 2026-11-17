@@ -64,6 +64,45 @@ const SNEAK_BOB: f32 = 0.6;
 /// Seconds to fade the whole effect in or out (Pip-Boy, idles, the switch).
 const FADE_SECONDS: f32 = 0.15;
 
+/// The turn lag's time constant while the view is still: the arms return to the view at
+/// this rate ([`SwayTuning::rest_chase`] at its default).
+pub const REST_CHASE_SECONDS: f32 = CHASE_SECONDS;
+
+/// B42 Inertia's own numbers, mapped onto this module's constants (`weapon_feel.rs`):
+/// `fIntensityMultVertical` → [`SwayTuning::intensity_v`], `fIntensityMultHorizontal` →
+/// [`SwayTuning::intensity_h`], and the two rates onto the lag's time constant — `5` and
+/// `1` are the mod's own defaults, so with its shipped values every field here equals the
+/// engine's constants above and the pose is bit-identical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SwayTuning {
+    /// Multiplies the turn lag's pitch (`fIntensityMultVertical`).
+    pub intensity_v: f32,
+    /// Multiplies the turn lag's heading (`fIntensityMultHorizontal`).
+    pub intensity_h: f32,
+    /// The lag's time constant while the view turns (`fSpeedMult`: 5 → [`CHASE_SECONDS`]).
+    pub turn_chase: f32,
+    /// The lag's time constant while the view holds still (`fCenteringSpeed`: 1 →
+    /// [`REST_CHASE_SECONDS`]).
+    pub rest_chase: f32,
+}
+
+impl SwayTuning {
+    /// The mod's own `fSpeedMult` and `fCenteringSpeed` as time constants: the mod's
+    /// defaults (5, 1) give the engine's [`CHASE_SECONDS`] exactly, so only a mod tuned
+    /// away from them changes the pose.
+    pub fn from_rates(speed_mult: f32, centering_speed: f32) -> SwayTuning {
+        let rate = |v: f32, reference: f32| if v.is_finite() && v > 0.0 { (reference / v).clamp(0.01, 2.0) } else { 1.0 };
+        SwayTuning { turn_chase: CHASE_SECONDS * rate(speed_mult, 5.0), rest_chase: CHASE_SECONDS * rate(centering_speed, 1.0), ..SwayTuning::default() }
+    }
+}
+
+impl Default for SwayTuning {
+    fn default() -> Self {
+        SwayTuning { intensity_v: 1.0, intensity_h: 1.0, turn_chase: CHASE_SECONDS, rest_chase: REST_CHASE_SECONDS }
+    }
+}
+
+
 /// What the sway reads each frame.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SwayInput {
@@ -97,6 +136,9 @@ impl SwayPose {
 /// The sway's state across frames.
 #[derive(Debug, Clone, Default)]
 pub struct ViewSway {
+    /// The constants this pose uses: the engine's by default, or the installed B42 Inertia
+    /// file's numbers (`weapon_feel.rs`, `--weapon-feel`).
+    pub tuning: SwayTuning,
     last: Option<(f32, f32)>,
     /// How far the arms are behind the view: heading and pitch, radians (arms − view).
     lag: Vec2,
@@ -130,14 +172,20 @@ impl ViewSway {
         self.gain += (f32::from(u8::from(i.on)) - self.gain) * follow(FADE_SECONDS);
         // Turn lag: the view turned by `d`, the arms not yet; they then close the gap.
         // A jump of the view (a teleport, an idle letting go) starts afresh.
+        let mut turned = false;
         if let Some((h, p)) = self.last {
             let d = Vec2::new(angle_diff(i.heading, h), i.pitch - p);
             if d.length() < 0.5 {
                 self.lag -= d;
+                turned = d.length() > 0.0;
             }
         }
         self.last = Some((i.heading, i.pitch));
-        self.lag *= 1.0 - follow(CHASE_SECONDS);
+        let t = self.tuning;
+        // The mod has a rate for a turn and one for coming back to centre; the engine's
+        // single constant is both of them.
+        let chase = if turned { t.turn_chase } else { t.rest_chase };
+        self.lag *= 1.0 - follow(chase);
         self.lag = Vec2::new(soft_clamp(self.lag.x, MAX_LAG_YAW), soft_clamp(self.lag.y, MAX_LAG_PITCH));
         // Movement: the bob follows the speed; the trailing velocity follows the velocity.
         let speed = i.velocity.length();
@@ -148,7 +196,8 @@ impl ViewSway {
         let g = self.gain;
         let sway_share = g * if i.sights { SIGHTS_SWAY } else { 1.0 };
         let bob_share = g * self.bob * if i.sights { SIGHTS_BOB } else { 1.0 } * if i.sneaking { SNEAK_BOB } else { 1.0 };
-        let lag = self.lag * sway_share;
+        // The mod's two intensity multipliers, each on its own axis.
+        let lag = Vec2::new(self.lag.x * t.intensity_h, self.lag.y * t.intensity_v) * sway_share;
         // Heading grows clockwise, a turn about +z anticlockwise: arms behind a turn to
         // the right point left of it.
         let turn = Quat::from_rotation_z(-lag.x) * Quat::from_rotation_x(lag.y);
@@ -171,6 +220,7 @@ impl ViewSway {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::math::EulerRot;
 
     fn input(heading: f32, velocity: Vec2, phase: f32) -> SwayInput {
         SwayInput { dt: 1.0 / 60.0, heading, pitch: 0.0, velocity, phase, sights: false, sneaking: false, airborne: false, on: true }
@@ -253,5 +303,107 @@ mod tests {
         settle(&mut s, input(0.0, v, FOOTFALL_PHASE), 120);
         let p = settle(&mut s, SwayInput { on: false, ..input(0.0, v, FOOTFALL_PHASE) }, 120);
         assert!(p.offset.length() < 1e-3, "{p:?}");
+    }
+
+    /// Turn right at `rate` rad/s for `frames`, from rest, and give the pose at the end.
+    fn turn(s: &mut ViewSway, rate: f32, frames: usize) -> SwayPose {
+        settle(s, input(0.0, Vec2::ZERO, 0.0), 60);
+        let mut h = 0.0;
+        let mut p = SwayPose::NONE;
+        for _ in 0..frames {
+            h += rate / 60.0;
+            p = s.update(input(h, Vec2::ZERO, 0.0));
+        }
+        p
+    }
+
+    #[test]
+    fn the_mods_defaults_are_the_engines_constants() {
+        let t = SwayTuning::from_rates(5.0, 1.0);
+        assert_eq!(t, SwayTuning::default());
+        assert_eq!(t.turn_chase, CHASE_SECONDS);
+        assert_eq!(t.rest_chase, REST_CHASE_SECONDS);
+        // A speed multiplier of 10 halves the time constant; a centering speed of 2 too.
+        let fast = SwayTuning::from_rates(10.0, 2.0);
+        assert!((fast.turn_chase - CHASE_SECONDS / 2.0).abs() < 1e-6);
+        assert!((fast.rest_chase - REST_CHASE_SECONDS / 2.0).abs() < 1e-6);
+        // Nonsense (0, negative, NaN) keeps the engine's.
+        assert_eq!(SwayTuning::from_rates(0.0, f32::NAN), SwayTuning::default());
+    }
+
+    #[test]
+    fn a_fixed_turn_converges_to_the_expected_lag() {
+        // The lag's steady state at a steady turn: each frame lays down `rate × dt` the
+        // other way and the decay takes back `lag × (1 − exp(−dt/chase))`. The rate is
+        // small enough that the soft clamp is within 0.01 % of linear.
+        let rate = 0.005;
+        let mut s = ViewSway::default();
+        let mut h = 0.0;
+        settle(&mut s, input(0.0, Vec2::ZERO, 0.0), 60);
+        for _ in 0..600 {
+            h += rate / 60.0;
+            s.update(input(h, Vec2::ZERO, 0.0));
+        }
+        let decay = 1.0 - (-(1.0 / 60.0) / CHASE_SECONDS).exp();
+        // L = (L − d)(1 − f) at rest, so L = −d(1 − f)/f.
+        let expected = -((rate / 60.0) * (1.0 - decay) / decay);
+        assert!((s.lag.x - expected).abs() < 1e-5, "lag {} against {expected}", s.lag.x);
+        // And it is what the pose turns by: a heading lag turns the arms the other way.
+        let before = s.lag.x;
+        let p = s.update(input(h, Vec2::ZERO, 0.0));
+        let z = p.rotation.to_euler(EulerRot::XYZ).2;
+        assert!((z + s.lag.x).abs() < 1e-4, "pose {z} against lag {}", s.lag.x);
+        assert!(s.lag.x.abs() < before.abs(), "and a frame with no turn lets it go");
+    }
+
+    #[test]
+    fn the_horizontal_intensity_scales_the_turn_exactly() {
+        let mut plain = ViewSway::default();
+        let mut half = ViewSway { tuning: SwayTuning { intensity_h: 0.4, ..SwayTuning::default() }, ..ViewSway::default() };
+        let a = turn(&mut plain, 0.05, 300);
+        let b = turn(&mut half, 0.05, 300);
+        let (aa, bb) = (a.rotation.to_euler(EulerRot::XYZ).2, b.rotation.to_euler(EulerRot::XYZ).2);
+        assert!(aa.abs() > 0.005, "the plain turn is visible: {a:?}");
+        assert!((bb - aa * 0.4).abs() < 1e-4, "{aa} {bb}");
+        // The vertical multiplier is the other axis and leaves this turn alone.
+        let mut v = ViewSway { tuning: SwayTuning { intensity_v: 0.4, ..SwayTuning::default() }, ..ViewSway::default() };
+        let c = turn(&mut v, 0.05, 300);
+        assert!((c.rotation.to_euler(EulerRot::XYZ).2 - aa).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_faster_speed_multiplier_holds_the_arms_closer_while_turning() {
+        // `fSpeedMult` 20 instead of 5: the same turn leaves them a fifth as far behind.
+        let mut slow = ViewSway::default();
+        let mut quick = ViewSway { tuning: SwayTuning::from_rates(20.0, 1.0), ..ViewSway::default() };
+        settle(&mut slow, input(0.0, Vec2::ZERO, 0.0), 60);
+        settle(&mut quick, input(0.0, Vec2::ZERO, 0.0), 60);
+        let (mut h, mut a, mut b) = (0.0, 0.0, 0.0);
+        for _ in 0..300 {
+            h += 0.05 / 60.0;
+            slow.update(input(h, Vec2::ZERO, 0.0));
+            quick.update(input(h, Vec2::ZERO, 0.0));
+            a = slow.lag.x;
+            b = quick.lag.x;
+        }
+        assert!(b.abs() < a.abs() * 0.6 && b.abs() > 0.0, "{a} {b}");
+        assert!(a.abs() <= MAX_LAG_YAW, "no overshoot: {a}");
+    }
+
+    #[test]
+    fn a_faster_centering_speed_comes_back_to_centre_sooner() {
+        // `fCenteringSpeed` 4 instead of 1: the same flick is gone four times as fast.
+        let mut slow = ViewSway::default();
+        let mut quick = ViewSway { tuning: SwayTuning::from_rates(5.0, 4.0), ..ViewSway::default() };
+        for s in [&mut slow, &mut quick] {
+            settle(s, input(0.0, Vec2::ZERO, 0.0), 60);
+            s.update(input(0.2, Vec2::ZERO, 0.0));
+        }
+        for _ in 0..6 {
+            slow.update(input(0.2, Vec2::ZERO, 0.0));
+            quick.update(input(0.2, Vec2::ZERO, 0.0));
+        }
+        assert!(quick.lag.x.abs() < slow.lag.x.abs() * 0.7, "{} {}", quick.lag.x, slow.lag.x);
+        assert!(quick.lag.x.abs() <= 0.2 + 1e-6, "no overshoot: {}", quick.lag.x);
     }
 }

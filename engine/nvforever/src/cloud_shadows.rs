@@ -473,7 +473,8 @@ mod tests {
         assert_eq!(strength(0.0, 1.0), 0.0);
         assert_eq!(strength(1.0, 0.0), 0.0);
         assert!((strength(0.8, 0.6) - 0.36).abs() < 1e-6);
-        assert_eq!(strength(2.0, 2.0), 1.0);
+        // The inputs clamp at 1; the picture darkens no more than SHADOW_STRENGTH.
+        assert_eq!(strength(2.0, 2.0), SHADOW_STRENGTH);
     }
 
     #[test]

@@ -85,6 +85,10 @@ pub struct LowerInput {
     pub friendly: bool,
     /// The player lowered it by hand (Lower Weapon, H).
     pub by_hand: bool,
+    /// A share FPS Weapon Lowering's own state asks for (running, standing idle; 0 when its
+    /// file was not found or the switch is off): it can lower the weapon on its own, but
+    /// never as far as a wall or the key does.
+    pub state_share: f32,
     /// Seconds from now the weapon must stay up: [`HOLD_UP_SECONDS`] while aiming, with
     /// the trigger held or an attack started, a reload's length when one starts; 0 else.
     pub up_for: f32,
@@ -122,7 +126,7 @@ impl WeaponLower {
         } else if i.friendly || i.by_hand {
             1.0
         } else {
-            i.wall.map_or(0.0, wall_share)
+            i.wall.map_or(0.0, wall_share).max(i.state_share.clamp(0.0, 1.0))
         };
         let t = if target > self.share {
             LOWER_SECONDS
@@ -232,7 +236,7 @@ mod tests {
     use super::*;
 
     fn input(wall: Option<f32>, friendly: bool, busy: bool) -> LowerInput {
-        LowerInput { dt: 1.0 / 60.0, wall, friendly, by_hand: false, up_for: if busy { HOLD_UP_SECONDS } else { 0.0 }, on: true }
+        LowerInput { dt: 1.0 / 60.0, wall, friendly, by_hand: false, state_share: 0.0, up_for: if busy { HOLD_UP_SECONDS } else { 0.0 }, on: true }
     }
 
     fn settle(l: &mut WeaponLower, i: LowerInput, frames: usize) -> f32 {
@@ -297,6 +301,21 @@ mod tests {
     fn switched_off_it_stays_up() {
         let mut l = WeaponLower::default();
         assert_eq!(settle(&mut l, LowerInput { on: false, ..input(Some(1.0), true, false) }, 90), 0.0);
+    }
+
+    #[test]
+    fn the_mod_state_lowers_it_part_way_and_a_wall_or_the_key_still_wins() {
+        let mut l = WeaponLower::default();
+        let running = LowerInput { state_share: 0.85, ..input(None, false, false) };
+        let s = settle(&mut l, running, 120);
+        assert!((s - 0.85).abs() < 0.02, "{s}");
+        let s = settle(&mut l, LowerInput { state_share: 0.85, ..input(Some(10.0), false, false) }, 120);
+        assert!(s > 0.99, "a wall close ahead is all the way down: {s}");
+        let s = settle(&mut l, LowerInput { state_share: 0.0, ..input(None, false, false) }, 120);
+        assert!(s < 1e-3, "the share gone, it comes back up: {s}");
+        // Aiming (up_for) wins over the mod's state too.
+        let s = settle(&mut l, LowerInput { state_share: 0.85, up_for: HOLD_UP_SECONDS, ..input(None, false, false) }, 120);
+        assert!(s < 1e-3, "{s}");
     }
 
     #[test]

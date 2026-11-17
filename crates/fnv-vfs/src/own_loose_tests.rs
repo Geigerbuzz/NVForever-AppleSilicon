@@ -39,6 +39,13 @@ fn loose(root: &Path, path: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
+/// A loose file in the overlay's own shape: ONE FOLDER PER MOD, each of those an asset
+/// root, later folders winning (`Vfs::open_for_plugins_in`). A file at the mods folder's
+/// own top level is not an asset, so a test's loose files live in a mod folder.
+fn home(r: &Roots, path: &str, bytes: &[u8]) -> PathBuf {
+    loose(&r.mods.join("TestMod"), path, bytes)
+}
+
 fn archive(root: &Path, name: &str, bytes: &[u8]) {
     let files = ["shared.xml", "archived.xml"].into_iter().map(|name| WriteFile {
         name: name.as_bytes().to_vec(), size_flag_bits: 0, data: encode_block(bytes, false, None),
@@ -51,7 +58,7 @@ fn archive(root: &Path, name: &str, bytes: &[u8]) {
 #[test]
 fn home_only_mixed_case_asset_has_the_same_read_and_stream_source() {
     let r = Roots::new();
-    let file = loose(&r.mods, "Meshes/Own/Clip.KF", b"authored home-only bytes");
+    let file = home(&r, "Meshes/Own/Clip.KF", b"authored home-only bytes");
     let vfs = r.open(Some(&r.mods));
     assert!(vfs.exists("MESHES/OWN/clip.kf"));
     assert_eq!(vfs.source_of("meshes\\own\\CLIP.KF"), Some("loose"));
@@ -70,7 +77,7 @@ fn two_loose_layers_keep_the_highest_actual_archive_underneath() {
     archive(&r.data, "High.bsa", b"hidden Data archive");
     archive(&r.mods, "High.bsa", b"winning home archive");
     loose(&r.data, "Menus/Main/shared.xml", b"Data loose");
-    let file = loose(&r.mods, "Menus/Main/Shared.XML", b"home loose");
+    let file = home(&r, "Menus/Main/Shared.XML", b"home loose");
     let vfs = r.open(Some(&r.mods));
     assert_eq!(vfs.read("menus/main/shared.xml").unwrap().unwrap(), b"home loose");
     assert_eq!(vfs.read_archived("menus/main/shared.xml").unwrap().unwrap(), b"winning home archive");
@@ -88,7 +95,7 @@ fn fresh_mounts_reveal_data_then_archive_when_higher_layers_are_removed() {
     let r = Roots::new();
     archive(&r.data, "High.bsa", b"archive");
     let data_file = loose(&r.data, "Menus/Main/shared.xml", b"Data");
-    let home_file = loose(&r.mods, "Menus/Main/shared.xml", b"home");
+    let home_file = home(&r, "Menus/Main/shared.xml", b"home");
     assert_eq!(r.open(Some(&r.mods)).read("menus/main/shared.xml").unwrap().unwrap(), b"home");
     std::fs::remove_file(home_file).unwrap();
     let data = r.open(Some(&r.mods));
@@ -121,14 +128,15 @@ fn optional_roots_preserve_reads_and_existing_archive_name_policy() {
             assert_eq!(vfs.read_archived(&path).unwrap().unwrap(), ordinary.read_archived(&path).unwrap().unwrap());
         }
     }
-    // Existing archive discovery names an explicit mods copy by its full path,
-    // even if both roots identify Data. Loose indexing must not change that rule.
+    // Existing archive discovery names an explicit mods copy by its full path. Passing
+    // Data itself as the layer (the same directory twice) is degenerate under the
+    // one-folder-per-mod overlay — its subfolders are read as mod folders — but the
+    // archive rule still names the copy by its full path, and Data's own loose files stay
+    // what `read` returns.
     let same = r.open(Some(&r.data));
     assert_eq!(same.archives().map(str::to_owned).collect::<Vec<_>>(), [r.data.join("High.bsa").to_string_lossy().into_owned()]);
-    assert_eq!(same.paths(|_| true), ordinary.paths(|_| true));
     assert_eq!(same.data_dir(), r.data.as_path());
     assert_eq!(same.read("menus/main/shared.xml").unwrap().unwrap(), b"Data");
-    assert_eq!(same.loose_path("menus/main/shared.xml"), ordinary.loose_path("menus/main/shared.xml"));
     assert_eq!(same.read_archived("menus/main/shared.xml").unwrap().unwrap(), b"archive");
 }
 
@@ -136,7 +144,7 @@ fn optional_roots_preserve_reads_and_existing_archive_name_policy() {
 fn root_level_files_are_excluded_while_layer_neighbors_remain() {
     let r = Roots::new();
     loose(&r.data, "Textures/Neighbor.dds", b"Data neighbor");
-    loose(&r.mods, "Meshes/Own.nif", b"home neighbor");
+    home(&r, "Meshes/Own.nif", b"home neighbor");
     for root in [&r.data, &r.mods] {
         loose(root, "Credits.txt", b"top level");
         loose(root, "Unloaded.esp", b"top level");
@@ -159,7 +167,7 @@ fn deleting_an_indexed_home_winner_keeps_read_error_instead_of_fallback() {
     let r = Roots::new();
     archive(&r.data, "High.bsa", b"archive");
     loose(&r.data, "Menus/Main/shared.xml", b"hidden Data");
-    let home = loose(&r.mods, "Menus/Main/shared.xml", b"home");
+    let home = home(&r, "Menus/Main/shared.xml", b"home");
     let vfs = r.open(Some(&r.mods));
     assert_eq!(vfs.read("menus/main/shared.xml").unwrap().unwrap(), b"home");
     std::fs::remove_file(&home).unwrap();
@@ -173,10 +181,10 @@ fn deleting_an_indexed_home_winner_keeps_read_error_instead_of_fallback() {
 #[test]
 fn the_path_index_requires_reopen_but_indexed_file_bytes_are_not_snapshotted() {
     let r = Roots::new();
-    let original = loose(&r.mods, "Meshes/Existing.nif", b"first");
+    let original = home(&r, "Meshes/Existing.nif", b"first");
     let vfs = r.open(Some(&r.mods));
     assert_eq!(vfs.read("meshes/existing.nif").unwrap().unwrap(), b"first");
-    loose(&r.mods, "Meshes/Added.nif", b"added later");
+    home(&r, "Meshes/Added.nif", b"added later");
     std::fs::write(original, b"updated bytes").unwrap();
     assert!(!vfs.exists("meshes/added.nif"));
     assert!(vfs.read("meshes/added.nif").is_none());

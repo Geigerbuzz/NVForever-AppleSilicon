@@ -345,8 +345,12 @@ impl Vfs {
     pub fn open_for_plugins_in<S: AsRef<str>>(data_dir: &Path, mods: Option<&Path>, plugins: &[S]) -> Result<Vfs, VfsError> {
         let mut vfs = Vfs::open(data_dir, &Vfs::order_for_plugins_in(data_dir, mods, plugins).0)?;
         if let Some(root) = mods {
-            // An absent optional layer is ordinary; other errors retain walk's diagnostics.
+            // An absent optional layer is ordinary; other errors are reported, as the
+            // loose walk's are.
             if !matches!(root.try_exists(), Ok(false)) {
+                if !root.is_dir() {
+                    vfs.skipped.push((root.display().to_string(), "the mods layer is not a folder".into()));
+                }
                 // The mods folder holds ONE FOLDER PER MOD, and each of those is an overlay
                 // root: a mod's `textures/` is the game's `textures/`, not
                 // `mods/<Mod Name>/textures/`. Indexing the mods folder itself put every

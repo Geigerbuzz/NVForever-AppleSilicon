@@ -156,6 +156,7 @@ mod settings;
 mod iron_sights;
 mod head_bob;
 mod view_sway;
+mod weapon_feel;
 mod weapon_lower;
 mod setup;
 mod shadow_probe;
@@ -795,6 +796,13 @@ struct Args {
     /// full-screen picture (scope_view.rs, a test version); a switch of the settings page.
     #[arg(long, requires = "play")]
     scope_3d: bool,
+    /// Let the installed weapon-feel mods' own config files drive the first-person
+    /// weapon: B42 Inertia's sway (`view_sway.rs`), Viewmodel Recoil's per-weapon patterns
+    /// (`nvf_play::combat`) and FPS Weapon Lowering's running/idle state
+    /// (`weapon_lower.rs`). Off: the engine's constants, as before (WEAPON-FEEL.md); a
+    /// switch of the settings page.
+    #[arg(long, requires = "play")]
+    weapon_feel: bool,
     /// Do not turn actors' heads to the player and to NPCs near them (head_look.rs,
     /// docs/spec-notes/actors.md §12).
     #[arg(long)]
@@ -1808,6 +1816,9 @@ fn main() -> AppExit {
             // The Vigor Tester's machine: its camera and lights, the room behind it.
             app.add_plugins(vigor_view::VigorViewPlugin);
             app.add_plugins((player_body::PlayerBodyPlugin { first_person_body: args.first_person_body, weapon_sway: !args.no_weapon_sway, head_bob: !args.no_head_bob, weapon_lower: !args.no_weapon_lower, true_iron_sights: !args.no_true_iron_sights }, stealth_field::StealthFieldPlugin, pipboy_arm::PipBoyArmPlugin, deaths::DeathsPlugin, limbs::LimbsPlugin, ragdoll::RagdollPlugin, swing_traps::SwingTrapsPlugin, wrecks::WrecksPlugin, shot_fx::ShotFxPlugin, particles::ParticlesPlugin, dismember::DismemberPlugin, grass_fire_fx::GrassFireFxPlugin));
+            // The installed weapon-feel mods' own numbers (weapon_feel.rs), read once from
+            // the mods overlay; the settings page can switch them on too.
+            app.add_plugins(weapon_feel::WeaponFeelPlugin { on: args.weapon_feel });
             app.insert_resource(nvf_play::aim_zoom::Scope3d { on: args.scope_3d, lens: false });
             app.add_plugins(decals::DecalsPlugin);
             app.add_plugins(knockouts::KnockoutsPlugin);

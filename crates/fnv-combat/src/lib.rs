@@ -22,6 +22,8 @@
 //!   (docs/design/combat-ai.md §19).
 //! - [`condition`]: how weapons and armour wear and what a worn item is worth
 //!   (docs/spec-notes/combat-rules.md §17).
+//! - [`pattern`]: Viewmodel Recoil's own per-weapon `[PATTERN]` files and the profile
+//!   that scales them, read from the mod's INIs (WEAPON-FEEL.md, "Implemented").
 
 pub mod attack;
 pub mod body_weapon;
@@ -33,6 +35,7 @@ pub mod dismember;
 pub mod fx;
 pub mod melee;
 pub mod mine;
+pub mod pattern;
 pub mod projectile;
 pub mod rng;
 pub mod shot;
