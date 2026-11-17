@@ -61,11 +61,11 @@ fn a_mods_config_is_read_and_listed() {
         assert_eq!(names.iter().filter(|n| n.eq_ignore_ascii_case(want)).count(), 1, "{want} in {names:?}");
     }
     let (_, same) = mod_files::data_files("Config").into_iter().find(|(n, _)| n == "Same.ini").unwrap();
-    assert!(same.starts_with(&mods.join("B42Inertia")), "the higher mod's copy is listed: {}", same.display());
+    assert!(same.starts_with(mods.join("B42Inertia")), "the higher mod's copy is listed: {}", same.display());
     let scripts: Vec<(String, PathBuf)> = mod_files::data_files("NVSE\\Plugins\\Scripts");
     assert_eq!(scripts.len(), 1, "{scripts:?}");
     assert_eq!(scripts[0].0, "ln_b42.txt");
-    assert!(scripts[0].1.starts_with(&mods.join("B42Inertia")));
+    assert!(scripts[0].1.starts_with(mods.join("B42Inertia")));
     // A file no root has is nothing, not a panic and not Data's folder with a wrong path.
     assert_eq!(mod_files::read_data_file("Config\\Absent.ini"), None);
 
