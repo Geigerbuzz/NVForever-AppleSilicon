@@ -664,6 +664,25 @@ pub(crate) fn call(g: &mut Game, ctx: &RunCtx, name: &str, subject: Option<FormI
                 })
             }
         }
+        // `"string"|"filename" [form]`: a trait of the sorting tag the form's base has
+        // [hypothesis: yUI's ySIGetTagTrait, which has no wiki page; observed:
+        // JustAssortedMods.esp 4.6 JLMySICustomSortUDF sorts two items by
+        // `aA[0].ySIGetTagTrait "string"` and JLMySIItemUDF shows the icon file
+        // `ySIGetTagTrait "filename" rItem`]. "string" is the tag itself and "filename"
+        // the icon texture ySI gives that tag; ySI's own json also has "template" and
+        // "category" per tag, which this engine does not read, so they and anything else
+        // read "". With ySI absent no form has a tag, so every read is "" and JLM hides
+        // its ySI icon rather than showing a wrong one [decision: ySI is not installed].
+        "ysigettagtrait" => {
+            let f = form(args, 1).or(subject).map(|f| crate::functions::base_of(g, f).unwrap_or(f));
+            let Some(f) = f else { return Some(Ok(XVal::Str(String::new()))) };
+            let tag = g.small.ysi_tag.get(&f).cloned();
+            XVal::Str(match text(args, 0).to_ascii_lowercase().as_str() {
+                "string" => tag.unwrap_or_default(),
+                "filename" => tag.and_then(|t| g.small.ysi_icon_by_tag.get(&t).cloned()).or_else(|| g.small.ysi_icon.get(&f).cloned()).unwrap_or_default(),
+                _ => String::new(),
+            })
+        }
         _ => return None,
     };
     Some(Ok(v))

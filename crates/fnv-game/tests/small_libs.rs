@@ -518,6 +518,15 @@ fn cacheui_anh_and_the_small_plugins() {
     assert!(matches!(q(&mut g, "SetFunctionValue (CreateOCLightClone TestLight PlayerREF)"), XVal::Ref(r) if r != 0 && r != LIGHT));
     q(&mut g, "ySISetTrait \"tag\" \"(fba1)\" TestGun\nySISetTrait \"tag\" \"(fba1)\" TestAmmo\nySISetTrait \"icon\" \"Interface\\Icons\\X.dds\" TestGun");
     assert_eq!(q(&mut g, "SetFunctionValue (ySIGetTrait \"icon\" TestAmmo)"), s("Interface\\Icons\\X.dds"));
+    // ySIGetTagTrait reads the tag's traits: `"string"` the tag, `"filename"` its icon
+    // file; a trait ySI's json has and this engine does not read, and a form with no tag,
+    // read "" (JustAssortedMods.esp 4.6 sorts by "string" and shows "filename").
+    assert_eq!(q(&mut g, "SetFunctionValue (ySIGetTagTrait \"string\" TestAmmo)"), s("(fba1)"));
+    assert_eq!(q(&mut g, "SetFunctionValue (ySIGetTagTrait \"filename\" TestAmmo)"), s("Interface\\Icons\\X.dds"));
+    assert_eq!(q(&mut g, "SetFunctionValue TestAmmo.ySIGetTagTrait \"string\""), s("(fba1)"));
+    assert_eq!(q(&mut g, "SetFunctionValue (ySIGetTagTrait \"template\" TestAmmo)"), s(""));
+    assert_eq!(q(&mut g, "SetFunctionValue (ySIGetTagTrait \"string\" TestBox)"), s(""));
+    assert_eq!(q(&mut g, "SetFunctionValue (ySIGetTagTrait \"string\")"), s(""));
     assert_eq!(q(&mut g, "array_var a\nlet a := GetCellRegions TestOutside\nSetFunctionValue a[0]"), XVal::Ref(REGION));
     assert_eq!(q(&mut g, "array_var a\nlet a := GetCellRegions TestInside\nSetFunctionValue (ar_Size a)"), n(0.0));
     assert_eq!(q(&mut g, "SetFunctionValue (StewieGetValue \"bJumpWhileAiming:Tweaks\")"), n(1.0));

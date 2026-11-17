@@ -251,7 +251,7 @@ impl<'a> Gen<'a> {
 
     pub(super) fn unit(mut self, src: &str) -> Compiled {
         let mut long = Vec::new();
-        let lines = self.take_lambdas(lex::join_open_conditions(lex::lines(src, &mut long)));
+        let lines = lex::join_open_lines(self.take_lambdas(lex::lines(src, &mut long)));
         for n in long {
             self.diags.push(Diag { line: n, kind: "line_too_long", error: false, detail: format!("over {} characters", lex::MAX_LINE) });
         }
