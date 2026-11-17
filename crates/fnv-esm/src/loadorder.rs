@@ -168,6 +168,48 @@ pub fn drop_unloadable(plugins: Vec<Plugin>) -> (Vec<Plugin>, Vec<DroppedPlugin>
     (kept, dropped)
 }
 
+/// The order a list of plugins loads in, as indices into it: every plugin after the masters
+/// it names, the list's own order kept wherever it already satisfies that. A list that is
+/// masters-first comes back unchanged.
+///
+/// A player's `plugins.txt` is written by hand and appended to by installers
+/// (`fnv_install::plugins::turn_on`), so it can be in *install* order rather than load
+/// order; the game must still load what the player turned on. On 2026-11-17 the owner's list
+/// in that state lost 21 plugins to "requires master …, which loads after it". A master that
+/// is not in the list does not hold its dependent back here: [`drop_unloadable`] reports it.
+/// A cycle (two plugins naming each other, which no real pair does) is broken in the list's
+/// order, so one of the two is then reported as loading before its master.
+pub fn masters_first(names: &[&str], masters: &[Vec<&str>]) -> Vec<usize> {
+    let lower: Vec<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+    let mut placed = vec![false; names.len()];
+    let mut out = Vec::with_capacity(names.len());
+    while out.len() < names.len() {
+        let mut progress = false;
+        for i in 0..names.len() {
+            if placed[i] {
+                continue;
+            }
+            // A master still waiting in the list holds its dependent back; one that is not
+            // in the list at all is `drop_unloadable`'s to report, and holds nothing back.
+            let blocked = masters[i].iter().any(|m| {
+                let ml = m.to_ascii_lowercase();
+                lower.iter().zip(&placed).any(|(n, p)| *n == ml && !*p)
+            });
+            if !blocked {
+                placed[i] = true;
+                out.push(i);
+                progress = true;
+            }
+        }
+        if !progress {
+            let i = placed.iter().position(|p| !p).expect("an unplaced plugin");
+            placed[i] = true;
+            out.push(i);
+        }
+    }
+    out
+}
+
 /// [`drop_unloadable`] on names: which to keep, and why the others go.
 fn loadable(names: &[&str], masters: &[Vec<&str>]) -> (Vec<bool>, Vec<DroppedPlugin>) {
     let lower: Vec<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
@@ -223,6 +265,31 @@ mod tests {
         assert_eq!(keep, [true, false, false, true]);
         assert_eq!(why[0], "Mod.esm requires master Gone.esm, which is not in the load order");
         assert_eq!(why[1], "Patch.esp requires master Mod.esm, which is not in the load order");
+    }
+
+    #[test]
+    fn a_list_in_install_order_loads_its_masters_first() {
+        let names = ["Mod.esp", "A.esm", "FalloutNV.esm", "Patch.esp", "Absent.esp"];
+        let masters: Vec<Vec<&str>> = vec![
+            vec!["A.esm", "FalloutNV.esm"],
+            vec!["FalloutNV.esm"],
+            vec![],
+            vec!["FalloutNV.esm", "Mod.esp"],
+            vec!["Gone.esm"],
+        ];
+        // FalloutNV.esm, then A.esm, then Mod.esp, then Patch.esp. Absent.esp names a
+        // master the list does not have at all, so nothing holds it back (drop_unloadable
+        // is what reports it, wherever it sits).
+        assert_eq!(masters_first(&names, &masters), [2, 4, 1, 0, 3]);
+        // A masters-first list is left exactly as it is.
+        let good = ["FalloutNV.esm", "A.esm", "Mod.esp"];
+        let good_masters: Vec<Vec<&str>> = vec![vec![], vec!["FalloutNV.esm"], vec!["FalloutNV.esm", "A.esm"]];
+        assert_eq!(masters_first(&good, &good_masters), [0, 1, 2]);
+        // Two plugins naming each other: the list's order decides and the second is the one
+        // drop_unloadable then reports.
+        let cycle = ["A.esp", "B.esp"];
+        let cycle_masters: Vec<Vec<&str>> = vec![vec!["B.esp"], vec!["A.esp"]];
+        assert_eq!(masters_first(&cycle, &cycle_masters), [0, 1]);
     }
 
     #[test]

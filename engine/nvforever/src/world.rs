@@ -59,6 +59,10 @@ pub struct OpenedPlugins {
 /// load order would refuse: a missing master, a master that loads after it, a second
 /// copy, past the 255th (`fnv_esm::loadorder::drop_unloadable`). The game goes on without
 /// them; a line for each is printed now (the log is not up yet) and kept for the log.
+///
+/// A list in *install* order (a player's `plugins.txt`, which installers append to) loads
+/// its masters first ([`fnv_esm::loadorder::masters_first`]); one already masters-first,
+/// as every `--plugins` harness passes, is left exactly as it is.
 pub fn open_plugins(data_dir: &Path, mods: &[PathBuf], names: &[String]) -> OpenedPlugins {
     let mut dropped = Vec::new();
     let mut plugins = Vec::with_capacity(names.len());
@@ -81,6 +85,19 @@ pub fn open_plugins(data_dir: &Path, mods: &[PathBuf], names: &[String]) -> Open
             }
             Err(e) => dropped.push(format!("plugin {n} left out: cannot be read: {e}")),
         }
+    }
+    // Masters before their dependents, whatever order the list came in. Nothing moves in a
+    // list that already satisfies it, so a harness's fixed order is untouched.
+    let order = {
+        let names: Vec<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
+        let masters: Vec<Vec<&str>> = plugins.iter().map(|p| p.header.masters.iter().map(|m| m.name.as_str()).collect()).collect();
+        fnv_esm::loadorder::masters_first(&names, &masters)
+    };
+    if order.iter().enumerate().any(|(i, j)| i != *j) {
+        let moved = order.iter().enumerate().filter(|(i, j)| i != *j).count();
+        eprintln!("setup: load order: {moved} of {} plugins take a different place so none loads before a master it names", plugins.len());
+        let mut slots: Vec<Option<EsmPlugin>> = plugins.into_iter().map(Some).collect();
+        plugins = order.iter().filter_map(|j| slots[*j].take()).collect();
     }
     let (plugins, refused) = fnv_esm::loadorder::drop_unloadable(plugins);
     dropped.extend(refused.into_iter().map(|d| format!("plugin {} left out: {}", d.plugin, d.reason)));
