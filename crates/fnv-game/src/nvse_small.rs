@@ -287,8 +287,10 @@ pub(crate) fn call(g: &mut Game, ctx: &RunCtx, name: &str, subject: Option<FormI
         // specified tube mesh"]: nothing, 0.
         "updatetubemesh" | "quitmeshinwithmeandupdatealready" => zero,
         // ---- CacheUI ----
-        // [documented: GetFPS, "Not 100% Accurate"]: one over the last frame's seconds.
-        "getfps" => XVal::Num(if g.cfg.frame_seconds > 0.0 { 1.0 / g.cfg.frame_seconds } else { 0.0 }),
+        // [documented: GetFPS, "Not 100% Accurate"]: one over the last rendered frame's
+        // seconds. While gameplay logic runs at a fixed 60 Hz (`frame_seconds`), the
+        // renderer's own frame is `render_seconds` (gameplay_clock, report 29 §6.1).
+        "getfps" => XVal::Num(if g.cfg.render_seconds > 0.0 { 1.0 / g.cfg.render_seconds } else { 0.0 }),
         // `path script`: one script per trait [documented: SetTileScript, "Only one
         // script can be register per trait"]; RemoveTileScript drops it.
         "settilescript" => {

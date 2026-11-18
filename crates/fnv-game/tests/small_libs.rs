@@ -479,6 +479,12 @@ fn cacheui_anh_and_the_small_plugins() {
     assert_eq!(q(&mut g, "SetFunctionValue (GetCameraFOV 0)"), n(90.0));
     // CacheUI.
     assert_eq!(q(&mut g, "SetFunctionValue (GetFPS)"), n(60.0));
+    // GetFPS reports the renderer, not the gameplay tick: at 60 Hz logic on a 120 Hz
+    // renderer (`gameplay_clock`) `frame_seconds` is 1/60 and `render_seconds` 1/120.
+    g.cfg.frame_seconds = 1.0 / 60.0;
+    g.cfg.render_seconds = 1.0 / 120.0;
+    assert_eq!(q(&mut g, "SetFunctionValue (GetFPS)"), n(120.0));
+    g.cfg.render_seconds = 1.0 / 60.0;
     let refs = q(&mut g, "array_var a\nlet a := SplitStringToRef \"TestGun, TestAmmo,Small.esm:803,Nothing\" \",\"\nSetFunctionValue (ar_Size a)");
     assert_eq!(refs, n(3.0));
     assert_eq!(q(&mut g, "array_var a\nlet a := SplitStringToRef \"TestGun,Small.esm:803\" \",\"\nSetFunctionValue a[1]"), XVal::Ref(LIGHT));

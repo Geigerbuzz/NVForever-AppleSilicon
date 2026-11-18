@@ -563,6 +563,30 @@ fn hand_activation_runs_on_activate_instead_of_the_default() {
 }
 
 #[test]
+fn the_quest_timer_takes_the_same_game_seconds_at_sixty_and_one_hundred_twenty_frames() {
+    // The 60 Hz gameplay clock feeds `Game::tick` a fixed 1/60 s `frame_seconds`; two
+    // 120 Hz frames instead feed it 1/120 twice. The quest's 0.5 s delay counts game
+    // time, so the stage must complete at the same game second either way (report 29
+    // §6.2, quest delay parity).
+    let f = fixture();
+    let until_done = |frame_seconds: f64| {
+        let mut g = game(&f);
+        g.cfg.frame_seconds = frame_seconds;
+        g.new_game();
+        g.set_stage(q(), 10);
+        let mut ticks = 0u64;
+        while !g.quest_state(q()).stages_done.contains(&20) && ticks < 10_000 {
+            g.tick();
+            ticks += 1;
+        }
+        assert!(g.quest_state(q()).stages_done.contains(&20), "the timer never completed");
+        ticks as f64 * frame_seconds
+    };
+    let (sixty, one_twenty) = (until_done(1.0 / 60.0), until_done(1.0 / 120.0));
+    assert!((sixty - one_twenty).abs() <= 1.0 / 60.0 + 1e-9, "60 Hz: {sixty} s, 120 Hz: {one_twenty} s");
+}
+
+#[test]
 fn the_quest_timer_runs_at_the_quest_delay_and_sets_the_complete_stage() {
     let f = fixture();
     let mut g = game(&f);

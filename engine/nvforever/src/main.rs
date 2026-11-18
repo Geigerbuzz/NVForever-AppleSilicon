@@ -192,6 +192,7 @@ mod stress_sample;
 mod profile;
 mod perf_overlay;
 mod occlusion;
+mod occlusion_cull;
 mod rooms;
 mod terrain;
 mod terrain_surface;
@@ -336,6 +337,11 @@ struct Args {
     /// their walls and would hide what is seen over them; occlusion.rs).
     #[arg(long)]
     occlusion_planes_outdoors: bool,
+    /// GPU occlusion culling (Hi-Z) on the gameplay camera, off by default for the A/B
+    /// (occlusion_cull.rs, report 26 §6 stage 1). Needs the camera's depth prepass, which
+    /// it has; the Mac supports the culling path.
+    #[arg(long)]
+    occlusion_culling: bool,
     /// Seconds a streamed cell takes to fade in or out against the distant LOD; 0 swaps
     /// at once (fade.rs).
     #[arg(long, default_value_t = 1.0)]
@@ -1796,6 +1802,8 @@ fn main() -> AppExit {
     .add_plugins(shadow_anchor::ShadowAnchorPlugin)
     // Interiors draw the rooms seen through portals only (rooms.rs).
     .add_plugins(rooms::RoomsPlugin { off: args.no_room_culling, planes_off: args.no_occlusion_planes, planes_outdoors: args.occlusion_planes_outdoors })
+    // GPU occlusion culling on the gameplay camera (`--occlusion-culling`, off for the A/B).
+    .add_plugins(occlusion_cull::OcclusionCullPlugin { on: args.occlusion_culling })
     .insert_resource(ClearColor(Color::srgb(0.62, 0.72, 0.85)))
     .insert_resource(GlobalAmbientLight { brightness: 600.0, ..default() })
     .insert_resource(sky_state)
@@ -2428,7 +2436,7 @@ fn vertical_fov(setting_deg: f32) -> f32 {
     nvf_play::free_cam::vertical_fov(setting_deg)
 }
 
-fn setup(mut commands: Commands, start: Res<StartPose>) {
+fn setup(mut commands: Commands, start: Res<StartPose>, args: Res<Args>) {
     let pos = game_to_bevy().transform_point(start.position);
     let (yaw, pitch) = (-start.heading.to_radians(), start.pitch.to_radians());
     let cam = commands.spawn((
@@ -2451,6 +2459,9 @@ fn setup(mut commands: Commands, start: Res<StartPose>) {
         // camera's prepass).
         bevy::camera::visibility::RenderLayers::from_layers(&[0, reflection::WATER_LAYER, sky::ARMS_LAYER, sky::BODY_LAYER, decals::DECAL_LAYER]),
     )).id();
+    // Hi-Z occlusion culling for the view (`--occlusion-culling`, report 26 §3(b)): the
+    // depth prepass above is what it splits into early and late.
+    occlusion_cull::add_to_camera(&mut commands, cam, args.occlusion_culling);
     if start.play {
         commands.entity(cam).insert(nvf_play::PlayerCamera);
     }
@@ -2849,6 +2860,24 @@ mod tests {
         assert_eq!(parse(&["--sun-shadows", "--cell", "Goodsprings"]).sun_shadows, Some(SunShadowMode::Quality));
         assert_eq!(parse(&["--sun-shadows=performance"]).sun_shadows, Some(SunShadowMode::Performance));
         assert_eq!(parse(&["--sun-shadows=quality"]).sun_shadows, Some(SunShadowMode::Quality));
+    }
+
+    #[test]
+    fn shadow_caster_budget_is_off_by_default() {
+        let args = parse(&["--cell", "Goodsprings"]);
+        assert_eq!(args.shadow_caster_budget, 0);
+        assert_eq!(args.shadow_caster_mid_radius, None);
+        let args = parse(&["--cell", "Goodsprings", "--shadow-caster-budget=256"]);
+        assert_eq!(args.shadow_caster_budget, 256);
+        assert_eq!(args.shadow_caster_mid_radius, None);
+        let args = parse(&["--shadow-caster-budget", "128", "--shadow-caster-mid-radius=4"]);
+        assert_eq!((args.shadow_caster_budget, args.shadow_caster_mid_radius), (128, Some(4.0)));
+    }
+
+    #[test]
+    fn occlusion_culling_is_off_by_default() {
+        assert!(!parse(&["--cell", "Goodsprings"]).occlusion_culling);
+        assert!(parse(&["--cell", "Goodsprings", "--occlusion-culling"]).occlusion_culling);
     }
 
     #[test]

@@ -59,6 +59,7 @@ pub mod script_camera;
 pub mod shake;
 pub mod sprint;
 pub mod game_start;
+pub mod gameplay_clock;
 pub mod furniture;
 pub mod grab;
 pub mod hitvol;
@@ -405,6 +406,8 @@ impl Plugin for PlayPlugin {
             .add_message::<ui_sounds::UiSound>()
             .init_resource::<furniture::PlayerSeat>()
             .configure_sets(Update, (PlaySet::Input, PlaySet::Physics, PlaySet::Activation, PlaySet::Scripts, PlaySet::Ui, PlaySet::Sync).chain())
+            // The gameplay clock: 60 Hz rules with the renderer free (report 29; `NVF_GAMEPLAY_HZ`).
+            .add_plugins(gameplay_clock::GameplayClockPlugin)
             .add_plugins((sim::SimPlugin, phys::PhysPlugin, player::PlayerPlugin, activate::ActivatePlugin, menu::MenuPlugin, dropped::DroppedPlugin, moved::MovedPlugin, pause::PausePlugin, wait::WaitPlugin, flashlight::FlashlightPlugin))
             .add_plugins((script::ScriptPlugin, hitvol::HitVolumePlugin, combat::CombatPlugin, sfx::SfxPlugin, music::MusicPlugin, ambient::AmbientPlugin, radio::RadioPlugin, voice::VoicePlugin, holotape::HolotapePlugin, loading::LoadingPlugin, dialogue_look::DialogueLookPlugin, hud::HudPlugin, compass::CompassPlugin))
             .add_plugins((world_sounds::WorldSoundsPlugin, effect_sounds::EffectSoundsPlugin, reticle::ReticlePlugin, quick_loot::QuickLootPlugin, xp_meter::XpMeterPlugin, radiation::RadiationPlugin, borders::BordersPlugin))

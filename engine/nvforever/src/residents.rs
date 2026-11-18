@@ -3133,7 +3133,7 @@ type Held<'w, 's> = (
 #[allow(clippy::too_many_arguments)]
 pub fn drive(
     mut commands: Commands,
-    time: Res<Time>,
+    (time, clock): (Res<Time>, Option<Res<nvf_play::gameplay_clock::GameplayClock>>),
     mut res: ResMut<Residents>,
     mut nav: ResMut<NavState>,
     world: Res<WorldData>,
@@ -3158,6 +3158,11 @@ pub fn drive(
     // actors walked and turned slower than the game's clock passed (Goodsprings at 6
     // frames a second: the settler of detection.md §5 came into view after the shot).
     let dt = time.delta_secs().min(nvf_play::phys::MAX_FRAME_SECONDS);
+    // AI decisions are a game rule: at 60 Hz they run on the clock's tick frames with
+    // the tick's dt, on the same frames as `Game::tick`; at 120 (the default) nothing
+    // changes. Walking and the visuals keep running every frame below.
+    let thinking = clock.as_deref().is_none_or(nvf_play::gameplay_clock::GameplayClock::is_due);
+    let think_dt = clock.as_deref().map_or(dt, |c| c.game_dt() as f32);
     let now = time.elapsed_secs();
     let res = &mut *res;
     // Start once the world around the camera has loaded (the actors can be seen).
@@ -3234,8 +3239,10 @@ pub fn drive(
             res.core.after_hour_jump(game, &nav, &world, &streamer, None);
             res.core.arrive(game, &nav, &world, &streamer, None);
             res.core.switch_navmeshes(game, &mut nav);
-            let _span = info_span!("ai::think").entered();
-            res.core.think(game, true, false, &nav, &world, &mut doors, None, None, dt, now, 0);
+            if thinking {
+                let _span = info_span!("ai::think").entered();
+                res.core.think(game, true, false, &nav, &world, &mut doors, None, None, think_dt, now, 0);
+            }
         }
         (None, Some(mut script), Some(sim)) => {
             let script = &mut *script;
@@ -3277,7 +3284,9 @@ pub fn drive(
                 drop(span);
                 let _span = info_span!("ai::think").entered();
                 let restored = rt.restored_from_save;
-                core.think(&mut rt.game, false, restored, &nav, &world, &mut doors, phys, blocks, dt, now, waited)
+                if thinking {
+                    core.think(&mut rt.game, false, restored, &nav, &world, &mut doors, phys, blocks, think_dt, now, waited)
+                }
             });
         }
         _ => return,

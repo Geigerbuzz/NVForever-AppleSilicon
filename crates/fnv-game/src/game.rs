@@ -143,6 +143,12 @@ fn stack_here() -> usize {
 pub struct GameConfig {
     /// Fixed frame step in seconds (deterministic traces).
     pub frame_seconds: f64,
+    /// The renderer's frame in seconds, for GetFPS: while gameplay logic runs at a
+    /// fixed 60 Hz the renderer may run at 120, and a perf mod reading `frame_seconds`
+    /// would think the game ran at 60 (gameplay_clock, report 29 §6.1). The engine writes
+    /// it every rendered frame.
+    #[serde(default = "one_sixtieth")]
+    pub render_seconds: f64,
     /// Unknown opcodes and undecodable pieces stop a script (tests) instead of being
     /// logged and skipped.
     pub strict: bool,
@@ -185,9 +191,14 @@ fn yes() -> bool {
     true
 }
 
+/// The default render frame time (headless runs and old saves): GetFPS reads 60.
+fn one_sixtieth() -> f64 {
+    1.0 / 60.0
+}
+
 impl Default for GameConfig {
     fn default() -> Self {
-        GameConfig { frame_seconds: 1.0 / 60.0, strict: false, trace_locals: false, seed: 0, max_steps: 100_000, modal_message_boxes: true, package_interval: None, goodbye_at_once: false, answer_ok_boxes: false }
+        GameConfig { frame_seconds: 1.0 / 60.0, render_seconds: 1.0 / 60.0, strict: false, trace_locals: false, seed: 0, max_steps: 100_000, modal_message_boxes: true, package_interval: None, goodbye_at_once: false, answer_ok_boxes: false }
     }
 }
 

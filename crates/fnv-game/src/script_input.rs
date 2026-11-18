@@ -47,6 +47,13 @@ pub struct ScriptInput {
     /// Taps asked for this frame (TapKey, TapControl as its key); the engine presses each
     /// for one frame [documented: TapKey].
     pub taps: Vec<u16>,
+    /// Keys and mouse buttons held since the last gameplay tick, and the taps asked for
+    /// since then: at 60 Hz logic ticks the engine samples input every rendered frame
+    /// but the tick skips frames, so a press between two ticks must survive until the
+    /// next one (gameplay_clock, report 29 §5). The engine fills these (`ScriptInput::latch`)
+    /// and the tick folds them in (`ScriptInput::begin_tick`).
+    pub pending_held: BTreeSet<u16>,
+    pub pending_taps: Vec<u16>,
     /// HoldControl's and ReleaseControl's keys, held (true) or let go from the next frame
     /// ([`ScriptInput::next_frame`]) [observed: controls1, IsControlPressed reads 0 in
     /// HoldControl's frame and 1 two frames on, and 1 in ReleaseControl's frame and 0
@@ -76,6 +83,22 @@ impl ScriptInput {
                 self.script_held.remove(&code);
             }
         }
+    }
+
+    /// Every rendered frame, after `held` and `taps` are rebuilt: remember what was
+    /// pressed since the last gameplay tick, so a 60 Hz tick does not miss a press that
+    /// began and ended between two of its frames.
+    pub fn latch(&mut self) {
+        self.pending_held.extend(self.held.iter().copied());
+        self.pending_taps.extend(self.taps.iter().copied());
+    }
+
+    /// At a gameplay tick (`Game::tick`): this frame's held keys plus everything latched
+    /// since the previous tick, including taps a script asked for (they last one tick).
+    pub fn begin_tick(&mut self) {
+        self.held.extend(self.pending_held.iter().copied());
+        self.held.extend(self.pending_taps.drain(..));
+        self.pending_held.clear();
     }
 
     /// `SetControl control code [type]`: the key (type 0) or mouse button (type 1, as
@@ -281,5 +304,31 @@ mod tests {
         call(&mut input, "setcontrol", &[XVal::Num(4.0), XVal::Num(1.0), XVal::Num(1.0)]);
         assert_eq!(call(&mut input, "getcontrol", &[XVal::Num(4.0), XVal::Num(1.0)]), Some(XVal::Num(257.0)));
         assert_eq!(input.rebinds, vec![(7, false, Some(48)), (4, true, Some(257))]);
+    }
+
+    #[test]
+    fn a_key_pressed_between_ticks_reaches_the_next_one() {
+        let mut input = ScriptInput::default();
+        // Frame 1: the key is down, latched.
+        input.held.insert(17);
+        input.latch();
+        // Frame 2 (no tick): it is up again; the tick comes after this frame.
+        input.held.clear();
+        input.latch();
+        input.begin_tick();
+        assert_eq!(call(&mut input, "iskeypressed", &[XVal::Num(17.0)]), Some(XVal::Num(1.0)));
+        assert!(input.pending_held.is_empty());
+    }
+
+    #[test]
+    fn a_tap_lasts_until_the_gameplay_tick() {
+        let mut input = ScriptInput::default();
+        call(&mut input, "tapkey", &[XVal::Num(17.0)]);
+        input.latch();
+        // The engine pressed and let go of it between the ticks.
+        input.taps.clear();
+        input.begin_tick();
+        assert_eq!(call(&mut input, "iskeypressed", &[XVal::Num(17.0)]), Some(XVal::Num(1.0)));
+        assert!(input.pending_taps.is_empty());
     }
 }

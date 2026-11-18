@@ -2023,7 +2023,7 @@ fn start_menu_frames(rt: &mut Runtime) {
 /// One frame of scripts, then their effects.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_scripts(
-    time: crate::pause::AidTime,
+    (time, clock): (crate::pause::AidTime, Option<Res<crate::gameplay_clock::GameplayClock>>),
     play: Res<PlayWorld>,
     mut phys: ResMut<PhysState>,
     location: Res<Location>,
@@ -2043,6 +2043,11 @@ pub(crate) fn run_scripts(
     // Items the player used up in the inventory menu (the menu already removed them),
     // kept until the runtime runs.
     let st = &mut *script;
+    // The gameplay clock's frame (`gameplay_clock`, report 29): at 120 Hz one tick with
+    // the frame's own time, as today; at 60 Hz the ticks that are due, and the render
+    // time in menus and loading.
+    let ticks = clock.as_deref().map_or(1, crate::gameplay_clock::GameplayClock::ticks_this_frame);
+    let game_dt = clock.as_deref().map_or_else(|| time.delta_secs_f64(), crate::gameplay_clock::GameplayClock::game_dt);
     st.used.extend(used.read().map(|u| (FormId(u.item), u.limb)));
     if st.rt.is_none() {
         if runtime_waits(st.held, menu_to_open.is_some()) {
@@ -2182,6 +2187,10 @@ pub(crate) fn run_scripts(
     // Activation, menu keys or a new runtime may have opened a menu since tiles' first
     // write. Build it before this tick's MenuMode blocks [design: ui-tile-tree.md §4.1].
     if let Some(rt) = st.rt.as_mut() {
+        // GetFPS reads the renderer's frame, not the gameplay tick (report 29 §6.1):
+        // the storeys' perf mods must not think the game runs at 60 because its logic
+        // ticked 60 times a second.
+        rt.game.cfg.render_seconds = time.delta_secs_f64();
         tiles.write(&mut rt.game);
     }
     // Scripts wait until the player stands in the world (its cell is known), and do not
@@ -2214,6 +2223,12 @@ pub(crate) fn run_scripts(
         }
     }
     if paused.0 || screen.active() {
+        // Nothing latched while the game stands still waits for the resume: the pause
+        // menu's own Esc (and a loading screen's keys) must not reach the first tick.
+        if let Some(rt) = st.rt.as_mut() {
+            rt.game.input.pending_held.clear();
+            rt.game.input.pending_taps.clear();
+        }
         // Under a loading screen the game is held for everyone, not only for the
         // scripts: the AI (`nvforever` residents: packages, Dialogue packages' force
         // greets, hellos, combat) reads `Game::loading` and does nothing until the
@@ -2228,6 +2243,14 @@ pub(crate) fn run_scripts(
         return;
     }
     let Some(character) = phys.player.as_ref() else { return };
+    // A frame the 60 Hz gameplay clock does not tick: the message readers above have
+    // drained what the engine sent (items queue in `st.used`), and everything below
+    // would consume the aids, console lines and the tick's own queues too early, so
+    // leave it all for the next tick. The pause/loading/menu paths above still ran
+    // (menus bypass with one tick a frame, `gameplay_clock`).
+    if ticks == 0 {
+        return;
+    }
     let player_capsule = Some(Capsule { feet: character.feet, radius: character.params.radius, height: character.params.height });
     // The aids' clock, which goes on while a menu holds the picture (`crate::pause`).
     let now = time.elapsed_secs();
@@ -2286,9 +2309,12 @@ pub(crate) fn run_scripts(
     rt.location = Some(*location);
     let loading = rt.frozen_frames > 0;
     rt.frozen_frames = rt.frozen_frames.saturating_sub(1);
-    // The frame's time; real time while the virtual clock stands still under a menu
-    // (`--menu-pause original`), so MenuMode scripts and a conversation's lines go on.
-    let dt = time.delta_secs_f64();
+    // The frame's time: one gameplay tick's worth at 60 Hz (step × the virtual clock's
+    // speed, so slow motion keeps 60 ticks a second of real time), the frame's own time
+    // at 120 Hz and in menus/loading (`gameplay_clock`); real time while the virtual
+    // clock stands still under a menu (`--menu-pause original`), so MenuMode scripts and
+    // a conversation's lines go on.
+    let dt = game_dt;
     let t0 = Instant::now();
     let mut marked = Vec::new();
     // EnableLoadingMenu this frame (`fnv_game::functions::ui::enable_loading_menu`).
@@ -2385,10 +2411,6 @@ pub(crate) fn run_scripts(
         // GameMode blocks run (a trigger waiting for its model holds its script,
         // `script_trigger::update`, #2571).
         rt.game.loading = loading;
-        if !rt.game.paused() {
-            crate::script_trigger::update(rt, &play, &phys, player_capsule);
-        }
-        rt.game.cfg.frame_seconds = dt;
         // Scripts' GetFallTimeElapsed (`fnv_game::nvse_gaps`).
         rt.game.gaps.air_times = phys
             .player
@@ -2397,8 +2419,18 @@ pub(crate) fn run_scripts(
             .chain(phys.npcs.iter().map(|(&r, b)| (FormId(r), b.ch.air_time)))
             .filter(|(_, t)| *t > 0.0)
             .collect();
-        with_ray_caster(&mut phys, &play.0, location.world, || rt.game.tick());
-        apply_pushes(&mut rt.game, &mut phys);
+        // What was pressed since the last tick is folded in before `Game::tick` reads it,
+        // so a key a player tapped between two ticks is not lost (`script_input.rs`).
+        rt.game.input.begin_tick();
+        // The clock's ticks for this frame: one, or two when a slow frame owes a second.
+        for _ in 0..ticks {
+            if !rt.game.paused() {
+                crate::script_trigger::update(rt, &play, &phys, player_capsule);
+            }
+            rt.game.cfg.frame_seconds = dt;
+            with_ray_caster(&mut phys, &play.0, location.world, || rt.game.tick());
+            apply_pushes(&mut rt.game, &mut phys);
+        }
         rt.ticked = true;
         crate::aid::after_tick(rt, aid_from);
         // A script's `Activate player` on an actor: the player talks to it.

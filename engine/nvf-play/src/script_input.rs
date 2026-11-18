@@ -125,6 +125,10 @@ fn script_input(
     // releases a direction immediately when that frame has no matching message.
     input.held.extend(wheel_codes.into_iter().zip([MOUSE_BASE + 8, MOUSE_BASE + 9])
         .filter_map(|(pressed, code)| pressed.then_some(code)));
+    // Everything held or tapped since the last gameplay tick: at 60 Hz the tick skips
+    // frames, and a key pressed and let go between two ticks must still reach it
+    // (`ScriptInput::begin_tick`, gameplay_clock, report 29 §5).
+    input.latch();
     if let Some(b) = bindings.as_deref() {
         // The engine's controls are the extender's 0–27, in the same order.
         input.bindings = GAME_CONTROLS[..GAME_INI_CONTROLS].iter().map(|(c, _, _)| {

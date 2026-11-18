@@ -2324,6 +2324,8 @@ fn run_as(
     let modal = input.given.iter().any(|g| matches!(g, Given::Menu { .. }));
     let cfg = GameConfig {
         frame_seconds: input.frame_seconds,
+        // No separate renderer in a headless run: GetFPS reads the input's frame time.
+        render_seconds: input.frame_seconds,
         trace_locals: input.trace_locals,
         seed: input.seed,
         modal_message_boxes: modal,
