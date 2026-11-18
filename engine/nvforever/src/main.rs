@@ -570,6 +570,11 @@ struct Args {
     /// Generation's Reflex limit (#2731, #2732: set before the window's swapchain exists).
     #[arg(long, requires = "log_frame_times")]
     frame_cap: Option<u32>,
+    /// Draw without waiting for the display's refresh (vsync off): the engine's own frame
+    /// rate reaches a fixed-refresh panel instead of being quantised to the next slot (a
+    /// 18 ms frame is shown every 25 ms at 120 Hz), at the cost of uneven pacing.
+    #[arg(long)]
+    no_vsync: bool,
     /// Test aid with --log-frame-times: after each logged period switch to the next of
     /// these sets of improvements, in a loop, starting with the first: `;`-separated,
     /// each `vanilla`, `enhanced` or keys as for --graphics-only; `no-sun-shadows` among
@@ -1708,7 +1713,7 @@ fn main() -> AppExit {
                     // Taking over a load: shown once its loading screen is up (handoff.rs).
                     visible: args.handoff.is_none(),
                     // Measuring frame times: not held to the display's refresh.
-                    present_mode: if args.log_frame_times.is_some() { bevy::window::PresentMode::AutoNoVsync } else { default() },
+                    present_mode: if args.log_frame_times.is_some() || args.no_vsync { bevy::window::PresentMode::AutoNoVsync } else { default() },
                     // `NVF_SWAPCHAIN_LATENCY=<n>`: frames the swapchain may queue (images: n + 1;
                     // Bevy's 2 otherwise), for measuring frame generation's pacing.
                     desired_maximum_frame_latency: std::env::var("NVF_SWAPCHAIN_LATENCY").ok().and_then(|v| v.trim().parse::<u32>().ok()).and_then(std::num::NonZeroU32::new),
@@ -1729,9 +1734,10 @@ fn main() -> AppExit {
     // The switches the settings page weighs against the INI (`--play` only), for the
     // frame split's start-time decision (perf_overlay/split.rs).
     .add_plugins(perf_overlay::PerfOverlayPlugin(args.fps, play.is_some().then(|| settings::given_switches(&args, &command_line()))))
-    // Vsync as Bevy's default, off while frame times are measured; no frame-rate cap unless
-    // --frame-cap asks for one (a measuring run only: the page's row decides otherwise).
-    .add_plugins(frame_pace::FramePacePlugin(frame_pace::FramePace { sync: if args.log_frame_times.is_none() { frame_pace::DisplaySync::Vsync } else { frame_pace::DisplaySync::Off }, cap: args.frame_cap.unwrap_or(0) }))
+    // Vsync as Bevy's default, off while frame times are measured or with --no-vsync; no
+    // frame-rate cap unless --frame-cap asks for one (a measuring run only: the page's row
+    // decides otherwise).
+    .add_plugins(frame_pace::FramePacePlugin(frame_pace::FramePace { sync: if args.log_frame_times.is_none() && !args.no_vsync { frame_pace::DisplaySync::Vsync } else { frame_pace::DisplaySync::Off }, cap: args.frame_cap.unwrap_or(0) }))
     .add_plugins(anti_lag::AntiLagPlugin(args.latency_reduction))
     // Defaults snapshots this command-line/default choice before apply_stored reads the INI.
     .add_plugins(frame_gen::FrameGenPlugin(args.frame_generation.unwrap_or_default()))
