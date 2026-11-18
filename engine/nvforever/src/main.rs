@@ -738,6 +738,11 @@ struct Args {
     /// Maximise the window once it is shown.
     #[arg(long)]
     window_maximized: bool,
+    /// Do not take focus when the window opens: it is never made the key window, so macOS does
+    /// not switch Space to it and the keyboard and mouse stay with whatever was in front (a
+    /// measurement aid; NVF_TEST_RUN_UNFOCUSED=1 implies it, as the runners use).
+    #[arg(long)]
+    window_unfocused: bool,
     /// With --play: a run taking over from one that loads a save or goes back to the main
     /// menu (handoff.rs): the window stays hidden until its loading screen is up, then
     /// this file is written for the old run to end.
@@ -1710,6 +1715,9 @@ fn main() -> AppExit {
                     mode: args.window.mode(),
                     resolution: bevy::window::WindowResolution::new(w, h).with_scale_factor_override(1.0),
                     position: args.window_at.map_or(WindowPosition::Automatic, WindowPosition::At),
+                    // A converging run must not take the owner's Space or input (2026-11-17).
+                    focused: !(args.window_unfocused
+                        || std::env::var_os("NVF_TEST_RUN_UNFOCUSED").is_some_and(|v| !v.is_empty())),
                     // Taking over a load: shown once its loading screen is up (handoff.rs).
                     visible: args.handoff.is_none(),
                     // Measuring frame times: not held to the display's refresh.
