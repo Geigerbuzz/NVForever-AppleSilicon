@@ -717,3 +717,35 @@ fn production_lighting_patches_compose_into_the_nif_forward_shader() {
         assert!(out.contains("nvf_to_light"), "the early-out reaches the composed shader");
     }
 }
+
+#[test]
+fn half_precision_world_lights_compose_and_validate() {
+    // The production chain plus lights/half_shader.rs (opt-in NVF_HALF_LIGHTS=1), composed into
+    // the NIF forward shader and validated by naga with f16 (Metal exposes SHADER_F16).
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut modules = vendored_modules();
+    let root = manifest.join("../nvf-assets/src");
+    sources(&root, "nvf_assets", &root, &mut modules);
+    modules.push(("embedded://nvforever/terrain_weights.wesl".into(), include_str!("terrain_weights.wesl").into()));
+    let key = "embedded://bevy_pbr/render/pbr_functions.wesl";
+    let original = crate::lights::unix_lines(&modules.iter().find(|(p, _)| p == key).expect("vendored pbr_functions").1);
+    let patched = crate::lights::display_patched(&original).expect("display edits");
+    let patched = crate::sun_visibility::hook_patched(&patched).expect("sun visibility hook");
+    let patched = crate::ssao_lighting::hook_patched(&patched).expect("ambient occlusion hook");
+    let patched = crate::lights::half_lights_patched(&patched).expect("half-precision anchors");
+    for m in modules.iter_mut().filter(|(p, _)| p == key) {
+        m.1 = patched.clone();
+    }
+    // pbr_lighting as the game patches it (game attenuation, nvf_light_colour, Fresnel at F0).
+    let lighting_key = "embedded://bevy_pbr/render/pbr_lighting.wesl";
+    for m in modules.iter_mut().filter(|(p, _)| p == lighting_key) {
+        let (lit, specular_ok, fresnel_ok) = crate::lights::lighting_edits(&crate::lights::unix_lines(&m.1));
+        assert!(specular_ok && fresnel_ok, "pbr_lighting edits apply");
+        m.1 = lit;
+    }
+    use nvf_assets::nif_surface_blend::HeightLayout;
+    for bindless in [false, true] {
+        let out = compose(&modules, "embedded://nvf_assets/nif_material.wesl", &nif_defs(bindless, false, false, false, HeightLayout::STORED));
+        assert!(out.contains("nvf_world_light_half"), "the f16 light reaches the composed shader");
+    }
+}

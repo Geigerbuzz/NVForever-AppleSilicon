@@ -30,6 +30,8 @@ const GAME_ATTENUATION: &str = "return saturate(1.0 - distanceSquare * inverseRa
 const PBR_FUNCTIONS: &str = "embedded://bevy_pbr/render/pbr_functions.wesl";
 
 mod display_shader;
+mod half_shader;
+pub(crate) use self::half_shader::half_lights_patched;
 pub(crate) use self::display_shader::display_patched;
 pub use self::display_shader::unix_lines;
 
@@ -184,6 +186,23 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
             crate::ssao_lighting::set_hook_state(crate::ssao_lighting::HookState::Failed);
             (patched, false)
         }
+    };
+    // Last, after every hook has added its imports (the f16 `enable` goes after them).
+    // Opt-in until measured: `NVF_HALF_LIGHTS=1` works a world view's light highlight out in
+    // f16 where its values are small (lights/half_shader.rs).
+    let patched = if std::env::var("NVF_HALF_LIGHTS").is_ok_and(|v| v == "1") {
+        match half_lights_patched(&patched) {
+            Some(p) => {
+                info!("lights: world lights' highlight in half precision (NVF_HALF_LIGHTS)");
+                p
+            }
+            None => {
+                error!("{PBR_FUNCTIONS}: the half-precision light anchors not found; lights stay f32");
+                patched
+            }
+        }
+    } else {
+        patched
     };
     let patched = crate::fog::with_source(shader, patched);
     let _ = shaders.insert(&state.handle, patched);
@@ -543,6 +562,24 @@ struct LightingShader {
     patched: bool,
 }
 
+/// bevy_pbr's `pbr_lighting` with the game's attenuation, the light colour as linear light
+/// ([`SPECULAR_EDITS`]) and Fresnel at F0 in world views ([`FRESNEL_EDIT`]), and whether the
+/// last two applied; the game's patch and the CPU shader checks share it.
+pub(crate) fn lighting_edits(source: &str) -> (String, bool, bool) {
+    let mut patched = source.replace(BEVY_ATTENUATION, GAME_ATTENUATION);
+    let specular_ok = SPECULAR_EDITS.iter().all(|(from, _)| patched.matches(from).count() == 1);
+    if specular_ok {
+        for (from, to) in SPECULAR_EDITS {
+            patched = patched.replace(from, to);
+        }
+    }
+    let fresnel_ok = patched.matches(FRESNEL_EDIT.0).count() == 1;
+    if fresnel_ok {
+        patched = patched.replace(FRESNEL_EDIT.0, FRESNEL_EDIT.1);
+    }
+    (patched, specular_ok, fresnel_ok)
+}
+
 /// Once bevy_pbr's lighting shader has loaded, swap its distance attenuation for the
 /// game's. Pipelines that already use it are rebuilt.
 fn patch_attenuation(mut state: ResMut<LightingShader>, mut shaders: ResMut<Assets<Shader>>) {
@@ -560,16 +597,11 @@ fn patch_attenuation(mut state: ResMut<LightingShader>, mut shaders: ResMut<Asse
         warn!("{PBR_LIGHTING}: distance attenuation not found (Bevy changed?); lights keep Bevy's inverse-square falloff");
         return;
     }
-    let mut patched = source.replace(BEVY_ATTENUATION, GAME_ATTENUATION);
-    if SPECULAR_EDITS.iter().all(|(from, _)| patched.matches(from).count() == 1) {
-        for (from, to) in SPECULAR_EDITS {
-            patched = patched.replace(from, to);
-        }
-    } else {
+    let (patched, specular_ok, fresnel_ok) = lighting_edits(&source);
+    if !specular_ok {
         error!("{PBR_LIGHTING}: light colour lines not found (Bevy changed?); highlights take display colours as light");
     }
-    if patched.matches(FRESNEL_EDIT.0).count() == 1 {
-        patched = patched.replace(FRESNEL_EDIT.0, FRESNEL_EDIT.1);
+    if fresnel_ok {
         info!("lights: the highlight's Fresnel factor stays at F0 in world views");
     } else {
         error!("{PBR_LIGHTING}: the highlight's Fresnel line not found once (Bevy changed?); highlights keep Bevy's Fresnel rise");
