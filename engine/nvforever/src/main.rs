@@ -1211,7 +1211,17 @@ fn main() -> AppExit {
             roots.reverse();
             roots
         }
-        None => fnv_install::EngineHome::user().map(|h| h.mods()).into_iter().collect(),
+        // NVForever's own mods layer holds one folder per mod: each is a root, highest
+        // precedence first (`plugin_path_in` takes the first that has the file), as
+        // `mods.txt` orders them (fnv_install::mods). The mods folder alone would find no
+        // plugin of a mod installed in its own folder.
+        None => fnv_install::EngineHome::user()
+            .map(|h| {
+                let mut roots = fnv_install::mods::mod_roots(&h.mods());
+                roots.reverse();
+                roots
+            })
+            .unwrap_or_default(),
     };
     let opened = world::open_plugins(args.data(), &mods, &args.plugins);
     args.plugins = opened.plugins.iter().map(|p| p.name.clone()).collect();
