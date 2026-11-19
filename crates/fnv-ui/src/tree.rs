@@ -340,6 +340,10 @@ pub struct Ui {
     named_sources: OnceLock<HashMap<TileId, HashMap<String, TileId>>>,
     /// This tree's number, in every [`TileId`] it makes ([`Ui::new`]).
     tree: u32,
+    /// The top-level tiles each injection made, by the tile it went into and its text's
+    /// hash ([`Ui::inject_text`]); and how many identical injections were skipped.
+    injected: HashMap<(TileId, u64), Vec<TileId>>,
+    pub reinjections_skipped: u64,
     /// The shape when [`Ui::update`] last ran, the updates in a row that found it changed,
     /// whether that was told ([`Ui::take_reshape_warning`]), and the last change of shape
     /// made from outside the tree: what did it and from where.
@@ -1183,11 +1187,35 @@ impl Ui {
     pub fn inject_text(&mut self, src: &dyn Source, at: &str, text: &str) -> bool {
         self.entered("inject_text");
         let Some(tile) = self.find_tile(at) else { return false };
+        // The same text into the same tile while every tile it made last time is still
+        // loaded: nothing to add. Each injection otherwise makes new tiles; a HUD mod that
+        // injects its prefab every frame (Post HUD World's AP bar, 2026-11-19) grew the
+        // tree by a full copy per frame and reshaped it every frame, so the whole tree's
+        // expressions were worked out again each frame (~7 ms on the Strip). A component
+        // unloaded since (UnloadUIComponent) leaves a dead tile, and the next injection
+        // makes it again [hypothesis: the original's InjectUIXML into a menu that already
+        // holds the same component is not documented; duplicate tiles would draw on top of
+        // each other the same, so skipping changes nothing visible].
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            (tile, h.finish())
+        };
+        if let Some(made) = self.injected.get(&key) {
+            if !made.is_empty() && made.iter().all(|&t| self.is_live(t)) {
+                self.reinjections_skipped += 1;
+                return true;
+            }
+        }
         let doc = xml::parse(text);
         for w in &doc.warnings {
             self.warnings.push(format!("injected into {at}: {w}"));
         }
+        let before: HashSet<TileId> = self.tile(tile).children.iter().copied().collect();
         self.fill(src, tile, &doc.nodes, 0, &Origin::Injected);
+        let made: Vec<TileId> = self.tile(tile).children.iter().copied().filter(|c| !before.contains(c)).collect();
+        self.injected.insert(key, made);
         true
     }
 

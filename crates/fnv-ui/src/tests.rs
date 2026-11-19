@@ -1667,3 +1667,29 @@ fn uio_bt_admission_retains_unknown_operator_diagnostics_and_boolean_controls() 
     assert_eq!(ui.warnings.len(), 1, "{:?}", ui.warnings);
     assert!(ui.warnings[0].contains("<bt_typo> is no operator; ignored"));
 }
+
+/// The same XML injected again into the same tile while its tiles are loaded adds nothing
+/// (Post HUD World's per-frame InjectUIXML grew the HUD by a copy a frame); different XML
+/// still goes in, and once the component is unloaded the same XML makes it again.
+#[test]
+fn injecting_the_same_text_again_adds_no_second_copy() {
+    let src = files();
+    let mut ui = loaded();
+    let panel = ui.find_tile("TestMenu/Panel").unwrap();
+    let xml = r#"<rect name="Once"> <x> 5 </x> </rect>"#;
+    let base = ui.tile(panel).children.len();
+    assert!(ui.inject_text(&src, "TestMenu/Panel", xml));
+    assert_eq!(ui.tile(panel).children.len(), base + 1);
+    for _ in 0..10 {
+        assert!(ui.inject_text(&src, "TestMenu/Panel", xml));
+    }
+    assert_eq!(ui.tile(panel).children.len(), base + 1, "no copy per call");
+    assert_eq!(ui.reinjections_skipped, 10);
+    assert!(ui.inject_text(&src, "TestMenu/Panel", r#"<rect name="Other"/>"#));
+    assert_eq!(ui.tile(panel).children.len(), base + 2, "other text still injects");
+    let once = ui.find_tile("TestMenu/Panel/Once").unwrap();
+    ui.unload_tile(once);
+    assert!(!ui.is_loaded("TestMenu/Panel/Once"));
+    assert!(ui.inject_text(&src, "TestMenu/Panel", xml));
+    assert!(ui.is_loaded("TestMenu/Panel/Once"), "made again after an unload");
+}
