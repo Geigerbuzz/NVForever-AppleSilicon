@@ -177,6 +177,7 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
         }
     };
     let patched = debug_light_cap(patched);
+    let patched = debug_light_no_specular(patched);
     // The ambient occlusion's hook goes in after the sun's; it too acts only under its
     // shader def (ssao_lighting.rs).
     let (patched, ao_hooked) = match crate::ssao_lighting::hook_patched(&patched) {
@@ -364,6 +365,24 @@ fn debug_light_cap(source: String) -> String {
         .replace(point, &format!("            i < min(clusterable_object_index_ranges.first_spot_light_index_offset, clusterable_object_index_ranges.first_point_light_index_offset + {n}u);"))
         .replace(spot, &format!("            i < min(clusterable_object_index_ranges.first_rect_light_index_offset, clusterable_object_index_ranges.first_spot_light_index_offset + {n}u);"));
     info!("lights: at most {n} point and {n} spot lights per cluster (NVF_DEBUG_LIGHT_CAP; {hits} loop bounds changed)");
+    out
+}
+
+/// Diagnostic only (off by default): `NVF_DEBUG_LIGHT_NO_SPECULAR=1` leaves Bevy's point and
+/// spot light out of a world view's loops (its diffuse is 0 there, so what goes is the lamps'
+/// highlight); the display sum's diffuse stays. A test of whether the loop's cost is the size
+/// of Bevy's light code rather than the number of times it runs.
+fn debug_light_no_specular(source: String) -> String {
+    if std::env::var("NVF_DEBUG_LIGHT_NO_SPECULAR").map_or(true, |v| v != "1") {
+        return source;
+    }
+    let point = "        let light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true);";
+    let spot = "        let light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse);";
+    let hits = source.matches(point).count() + source.matches(spot).count();
+    let out = source
+        .replace(point, "        var light_contrib = vec3(0.0);\n        if !nvf_display { light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true); }")
+        .replace(spot, "        var light_contrib = vec3(0.0);\n        if !nvf_display { light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse); }");
+    info!("lights: no Bevy light highlight in world views (NVF_DEBUG_LIGHT_NO_SPECULAR; {hits} calls changed)");
     out
 }
 

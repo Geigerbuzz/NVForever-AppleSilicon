@@ -28,9 +28,8 @@
 /// Helper functions, put in front of `apply_pbr_lighting` (after the display helpers).
 pub(crate) const HALF_HELPERS: &str = "// NVForever (lights/half_shader.rs): a world view's point light highlight, f16 where safe.
 @if(!PREPASS_FRAGMENT)
-fn nvf_world_light_half(light_id: u32, input: ptr<function, lighting::LightingInput>) -> vec3<f32> {
+fn nvf_world_light_half(light_id: u32, P: vec3<f32>, N0: vec3<f32>, V0: vec3<f32>, R0: vec3<f32>, rough0: f32, NdotV0: f32, F0_32: vec3<f32>, F_ab32: vec2<f32>) -> vec3<f32> {
     let light = &view_bindings::clustered_lights.data[light_id];
-    let P = (*input).P;
     let light_to_frag = (*light).position_radius.xyz - P;
     let distance_square = dot(light_to_frag, light_to_frag);
     let attenuation = lighting::getDistanceAttenuation(distance_square, (*light).color_inverse_square_range.w);
@@ -39,15 +38,21 @@ fn nvf_world_light_half(light_id: u32, input: ptr<function, lighting::LightingIn
     }
     let distance = sqrt(distance_square);
     let light_radius = (*light).position_radius.w;
-    let spec = lighting::compute_specular_layer_values_for_point_light(input, 0u, (*input).V, light_to_frag, light_radius, distance);
+    // The base layer's values come in as plain values (no pointer to LightingInput, no runtime
+    // layer index: Bevy's helper indexes `layers` at run time through a pointer, which can keep
+    // the whole struct in stack memory). Its sphere-light closest point, inlined, layer 0:
+    let LtFdotR = max(0.0001, dot(light_to_frag, R0));
+    let center_to_ray = LtFdotR * R0 - light_to_frag;
+    let closest = light_to_frag + center_to_ray * saturate(light_radius * inverseSqrt(dot(center_to_ray, center_to_ray)));
+    let spec = vec4(closest * inverseSqrt(dot(closest, closest)), saturate(rough0 + light_radius / (2.0 * distance)));
     let solid_angle = light_radius * light_radius / max(distance_square, 1e-4);
 
-    let N = vec3<f16>((*input).layers[0].N);
-    let V = vec3<f16>((*input).V);
+    let N = vec3<f16>(N0);
+    let V = vec3<f16>(V0);
     let L = vec3<f16>(spec.xyz);
-    let a = f16((*input).layers[0].roughness);
+    let a = f16(rough0);
     let a_prime = max(f16(spec.w), 0.002h);
-    let NdotV = f16(max((*input).layers[0].NdotV, 1e-4));
+    let NdotV = f16(max(NdotV0, 1e-4));
     let H = normalize(L + V);
     let NdotL = saturate(dot(N, L));
     let NdotH = saturate(dot(N, H));
@@ -65,8 +70,8 @@ fn nvf_world_light_half(light_id: u32, input: ptr<function, lighting::LightingIn
     let lambda_v = NdotL * sqrt((NdotV - r2 * NdotV) * NdotV + r2);
     let lambda_l = NdotV * sqrt((NdotL - r2 * NdotL) * NdotL + r2);
     let Vis = min(0.5h / max(lambda_v + lambda_l, 1e-4h), 1000.0h);
-    let F0 = vec3<f16>(mix((*input).F0_dielectric, (*input).F0_metallic, (*input).metallic));
-    let F_ab = vec2<f16>((*input).F_ab);
+    let F0 = vec3<f16>(F0_32);
+    let F_ab = vec2<f16>(F_ab32);
     let multi = 1.0h + F0 * (1.0h / max(F_ab.x + F_ab.y, 1e-3h) - 1.0h);
     // In f32 from here: D * Vis can reach 3e7.
     var highlight = vec3<f32>(F0 * multi) * (f32(specular_intensity) * f32(D) * f32(Vis));
@@ -74,7 +79,7 @@ fn nvf_world_light_half(light_id: u32, input: ptr<function, lighting::LightingIn
     if light_radius > 0.0 {
         highlight *= saturate(nl / max(nl + solid_angle, 1e-4));
     }
-    return highlight * nl * lighting::nvf_light_colour((*light).color_inverse_square_range.rgb) * attenuation;
+    return highlight * nl * NVF_HALF_COLOUR((*light).color_inverse_square_range.rgb) * attenuation;
 }
 ";
 
@@ -98,17 +103,21 @@ pub(crate) fn half_lights_patched(source: &str) -> Option<String> {
             }
             let nvf_cd = dot(-nvf_spot_dir, normalize((*nvf_spot).position_radius.xyz - in.world_position.xyz));
             let nvf_cone = saturate(nvf_cd * (*nvf_spot).light_custom_data.z + (*nvf_spot).light_custom_data.w);
-            light_contrib = nvf_world_light_half(light_id, &lighting_input) * (nvf_cone * nvf_cone);
+            light_contrib = nvf_world_light_half(light_id, lighting_input.P, lighting_input.layers[0].N, lighting_input.V, lighting_input.layers[0].R, lighting_input.layers[0].roughness, lighting_input.layers[0].NdotV, mix(lighting_input.F0_dielectric, lighting_input.F0_metallic, lighting_input.metallic), lighting_input.F_ab) * (nvf_cone * nvf_cone);
         } else {
             light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse);
         }";
     let point_half = "        var light_contrib: vec3<f32>;
         if nvf_display {
-            light_contrib = nvf_world_light_half(light_id, &lighting_input);
+            light_contrib = nvf_world_light_half(light_id, lighting_input.P, lighting_input.layers[0].N, lighting_input.V, lighting_input.layers[0].R, lighting_input.layers[0].roughness, lighting_input.layers[0].NdotV, mix(lighting_input.F0_dielectric, lighting_input.F0_metallic, lighting_input.metallic), lighting_input.F_ab);
         } else {
             light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true);
         }";
     let body = source.replacen(HEAD, &format!("{HALF_HELPERS}{HEAD}"), 1).replace(POINT, point_half).replace(SPOT, spot_half);
+    // Diagnostic: `NVF_DEBUG_LIGHT_NO_POW=1` takes the light's colour as it is (the wrong
+    // tint), to measure what `nvf_light_colour`'s three pow calls per light and pixel cost.
+    let colour = if std::env::var("NVF_DEBUG_LIGHT_NO_POW").is_ok_and(|v| v == "1") { "" } else { "lighting::nvf_light_colour" };
+    let body = body.replace("NVF_HALF_COLOUR", colour);
     Some(with_enable_after_imports(&body, "enable f16;"))
 }
 
