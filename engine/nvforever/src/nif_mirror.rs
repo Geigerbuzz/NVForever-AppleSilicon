@@ -279,6 +279,40 @@ pub(crate) fn root_of(r: u32, view: ModelView, rigs: &Rigs, visuals: &Visuals) -
     visuals.iter().filter(|(_, v, _)| v.0 == r).find(|(_, _, p)| p.is_none_or(|p| visuals.get(p.parent()).map_or(true, |(_, v, _)| v.0 != r))).map(|(e, _, _)| e)
 }
 
+/// Each reference's root visual entity as [`root_of`] finds it by scanning — the first in the
+/// query's order carrying the reference's `RefVisual` whose parent is not a visual of the same
+/// reference — worked out in one pass. `root_of` scanned every visual entity of the loaded
+/// cells for each call, and `mirror_game` calls it per watched reference several times a
+/// frame: on the Strip with 162 plugins that was about half of the mirror's time, itself the
+/// largest system the main thread waited for (CPU sample 2026-11-19). The query cannot change
+/// during one system run (spawns and despawns are deferred commands), so an index built at the
+/// start of the run gives the same answers.
+pub(crate) struct VisualRoots(HashMap<u32, Entity>);
+
+impl VisualRoots {
+    pub(crate) fn new(visuals: &Visuals) -> VisualRoots {
+        let mut roots = HashMap::new();
+        for (e, v, p) in visuals.iter() {
+            if roots.contains_key(&v.0) {
+                continue;
+            }
+            if p.is_none_or(|p| visuals.get(p.parent()).map_or(true, |(_, pv, _)| pv.0 != v.0)) {
+                roots.insert(v.0, e);
+            }
+        }
+        VisualRoots(roots)
+    }
+}
+
+/// [`root_of`] through a [`VisualRoots`] index of the same query.
+pub(crate) fn root_of_indexed(r: u32, view: ModelView, rigs: &Rigs, roots: &VisualRoots) -> Option<Entity> {
+    if let Some((e, _)) = rig_of(r, view, rigs) {
+        return Some(e);
+    }
+    if r == FormId::PLAYER_REF.0 { return None; }
+    roots.0.get(&r).copied()
+}
+
 /// The node entities under `root`, depth first, with their parent's index; an actor's
 /// root first (its skeleton's root node), the rest under it.
 fn walk(root: Entity, nodes: &NodeQuery, rig: &RigNames) -> Vec<(Entity, Option<usize>)> {
@@ -471,6 +505,7 @@ fn mirror_game(
     dropped: Dropped,
 ) {
     let Memory { logged, held, bound_held, pending_held, edit_order, tables, materials, owned, attachment_materials, props, files } = mem;
+    let roots = VisualRoots::new(&visuals);
     game.scene.use_separate_player_models();
     let edits = game.scene.take_targeted_edits();
     let mut edits_rest = Vec::new();
@@ -495,7 +530,7 @@ fn mirror_game(
         // The file-only legacy route above keeps its existing behavior.
         let Some(order) = edit_order.checked_add(1) else { continue };
         *edit_order = order;
-        let root = root_of(r.0, view, &rigs, &visuals);
+        let root = root_of_indexed(r.0, view, &rigs, &roots);
         if matches!(queued.target, SceneTarget::Legacy | SceneTarget::Model(_)) {
             let captured = match queued.target { SceneTarget::Model(model) => Some(model), _ => None };
             if captured.is_some_and(|model| root.is_none_or(|root| root.to_bits() != model || nodes.get(root).is_err())) {
@@ -544,7 +579,7 @@ fn mirror_game(
             SceneEdit::Translation { r, .. } | SceneEdit::Rotation { r, .. } | SceneEdit::Scale { r, .. } | SceneEdit::Flags { r, .. } | SceneEdit::ChildFlags { r, .. } | SceneEdit::Rename { r, .. } | SceneEdit::Remove { r, .. } | SceneEdit::Insert { r, .. } | SceneEdit::Attach { r, .. } | SceneEdit::Light { r, .. } | SceneEdit::Material { r, .. } | SceneEdit::Particle { r, .. } => *r,
             SceneEdit::ForModel { .. } => continue,
         };
-        let Some(root) = root_of(r.0, view, &rigs, &visuals) else { continue };
+        let Some(root) = root_of_indexed(r.0, view, &rigs, &roots) else { continue };
         let rig = rig_names(r.0, view, &rigs);
         // Cold compatibility and the legacy file path resolve once by name/index. Keeping
         // an absent entity is significant: particle/material handlers historically
@@ -679,7 +714,7 @@ fn mirror_game(
     // The held transforms, over this frame's pose.
     let keys: Vec<(u32, ModelView, String)> = held.keys().cloned().collect();
     for (r, view, node) in keys {
-        let Some(root) = root_of(r, view, &rigs, &visuals) else { continue };
+        let Some(root) = root_of_indexed(r, view, &rigs, &roots) else { continue };
         let rig = rig_names(r, view, &rigs);
         let h = held[&(r, view, node.clone())];
         apply_held(root, &node, h, &mut nodes, &rig);
@@ -687,7 +722,7 @@ fn mirror_game(
     // Name-based startup holds acquire a model as soon as it exists. They may
     // wait for a late child only in that model, then become concrete node holds.
     pending_held.retain(|&(r, view, ref name), pending| {
-        let Some(root) = root_of(r, view, &rigs, &visuals) else { return pending.model.is_none() };
+        let Some(root) = root_of_indexed(r, view, &rigs, &roots) else { return pending.model.is_none() };
         if nodes.get(root).is_err() { return pending.model.is_none() }
         let model = root.to_bits();
         if pending.model.is_some_and(|captured| captured != model) { return false }
@@ -703,7 +738,7 @@ fn mirror_game(
     // An edit holds over animation only while this exact model/node lives. A
     // disappearance, immediate root replacement, child ABA or subtree departure expires it.
     bound_held.retain(|&(r, view, identity), value| {
-        let Some(root) = root_of(r, view, &rigs, &visuals) else { return false };
+        let Some(root) = root_of_indexed(r, view, &rigs, &roots) else { return false };
         let rig = rig_names(r, view, &rigs);
         let Some(entity) = bound_entity(root, identity, &nodes, &rig) else { return false };
         apply_value(entity, value.value, &mut nodes);
@@ -768,7 +803,7 @@ fn mirror_game(
             &[ModelView::ThirdPerson, ModelView::FirstPerson]
         } else { &[ModelView::Reference] };
         for &view in views {
-            let Some(root) = root_of(r.0, view, &rigs, &visuals) else {
+            let Some(root) = root_of_indexed(r.0, view, &rigs, &roots) else {
                 if logged.insert(r.0) {
                     info!("nif mirror: {:08X} watched, not drawn", r.0);
                 }
@@ -844,7 +879,7 @@ fn mirror_game(
     let wanted: Vec<(FormId, String)> = game.scene.wanted_vertices().cloned().collect();
     for (r, node) in wanted {
         let view = concrete_view(r.0, ModelView::Reference);
-        let verts = root_of(r.0, view, &rigs, &visuals)
+        let verts = root_of_indexed(r.0, view, &rigs, &roots)
             .and_then(|root| find(root, &node, &nodes, &rig_names(r.0, view, &rigs)))
             .and_then(|e| shapes.get(e).ok())
             .and_then(|m| meshes.as_deref()?.get(&m.0))
@@ -885,6 +920,36 @@ mod tests {
         assert_eq!(root(&mut world), None, "its light sources alone");
         let drawn = world.spawn((Transform::IDENTITY, RefVisual(R))).id();
         assert_eq!(root(&mut world), Some(drawn), "not a light source beside it");
+    }
+
+    #[test]
+    fn the_root_index_answers_as_the_scan_does() {
+        // Several references, nested visuals of one reference under another of the same
+        // (not a root), a child under another reference's visual (a root), light sources
+        // (never roots) and a reference with none: the index and the scan agree on each.
+        let mut world = World::new();
+        let a_top = world.spawn((Transform::IDENTITY, RefVisual(0xA))).id();
+        world.spawn((Transform::IDENTITY, RefVisual(0xA), ChildOf(a_top)));
+        let b_top = world.spawn((Transform::IDENTITY, RefVisual(0xB), ChildOf(a_top))).id();
+        world.spawn((Transform::IDENTITY, RefVisual(0xB), ChildOf(b_top)));
+        world.spawn((PointLight::default(), RefVisual(0xC)));
+        let c = world.spawn((Transform::IDENTITY, RefVisual(0xC))).id();
+        world.spawn((Transform::IDENTITY, RefVisual(0xD)));
+        world.spawn((Transform::IDENTITY, RefVisual(0xD)));
+        for r in [0xA, 0xB, 0xC, 0xD, 0xE, FormId::PLAYER_REF.0] {
+            let (scan, indexed) = world
+                .run_system_once(move |rigs: Rigs, visuals: Visuals| {
+                    let roots = VisualRoots::new(&visuals);
+                    (root_of(r, ModelView::Reference, &rigs, &visuals), root_of_indexed(r, ModelView::Reference, &rigs, &roots))
+                })
+                .unwrap();
+            assert_eq!(scan, indexed, "reference {r:X}");
+        }
+        let roots = world.run_system_once(|rigs: Rigs, visuals: Visuals| {
+            let roots = VisualRoots::new(&visuals);
+            [0xA, 0xB, 0xC].map(|r| root_of_indexed(r, ModelView::Reference, &rigs, &roots))
+        }).unwrap();
+        assert_eq!(roots, [Some(a_top), Some(b_top), Some(c)]);
     }
 
     #[test]
