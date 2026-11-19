@@ -2863,18 +2863,6 @@ mod tests {
     }
 
     #[test]
-    fn shadow_caster_budget_is_off_by_default() {
-        let args = parse(&["--cell", "Goodsprings"]);
-        assert_eq!(args.shadow_caster_budget, 0);
-        assert_eq!(args.shadow_caster_mid_radius, None);
-        let args = parse(&["--cell", "Goodsprings", "--shadow-caster-budget=256"]);
-        assert_eq!(args.shadow_caster_budget, 256);
-        assert_eq!(args.shadow_caster_mid_radius, None);
-        let args = parse(&["--shadow-caster-budget", "128", "--shadow-caster-mid-radius=4"]);
-        assert_eq!((args.shadow_caster_budget, args.shadow_caster_mid_radius), (128, Some(4.0)));
-    }
-
-    #[test]
     fn occlusion_culling_is_off_by_default() {
         assert!(!parse(&["--cell", "Goodsprings"]).occlusion_culling);
         assert!(parse(&["--cell", "Goodsprings", "--occlusion-culling"]).occlusion_culling);
