@@ -568,6 +568,20 @@ impl TriggerShape {
                 d2 <= reach * reach
             }
             TriggerKind::Box { half_extents: h } => {
+                // Far from the box's bounding sphere: no touch, without the search. Every
+                // actor is tested against every trigger each frame, and on the Strip this
+                // test was ~0.35 ms of the main thread (CPU sample 2026-11-19).
+                {
+                    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                    let len2: f32 = ab.iter().map(|v| v * v).sum();
+                    let t = if len2 > 0.0 { (-(a[0] * ab[0] + a[1] * ab[1] + a[2] * ab[2]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                    let p = at(t);
+                    let d2: f32 = p.iter().map(|v| v * v).sum();
+                    let reach = (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt() + r;
+                    if d2 > reach * reach + 1e-3 {
+                        return false;
+                    }
+                }
                 // The distance from a point of the axis to the box is convex along the
                 // axis: a golden-section search finds its minimum.
                 let dist2 = |t: f32| -> f32 {

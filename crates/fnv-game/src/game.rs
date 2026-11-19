@@ -3487,7 +3487,11 @@ impl<'a> Game<'a> {
         let data = self.data;
         let opts = self.opts();
         let self_ref = on.and_then(|v| v.as_form()).map(FormId);
-        let (unit, params, body, value, locals): (&Compiled, Vec<VarRef>, Vec<Stmt>, Option<fnv_script::ir::XExpr>, Locals) = if id >= LAMBDA_BASE {
+        // A function script's body is borrowed from the load order's compiled unit, which
+        // outlives the game: cloning it on every call was ~0.4 ms of each Strip frame
+        // (Stmt::clone + its drop, CPU sample 2026-11-19, 162 plugins). A lambda's body is
+        // its own copy, as before.
+        let (unit, params, body, value, locals): (&Compiled, Vec<VarRef>, std::borrow::Cow<'a, [Stmt]>, Option<fnv_script::ir::XExpr>, Locals) = if id >= LAMBDA_BASE {
             let d = self.lambdas.get((id - LAMBDA_BASE) as usize).cloned().ok_or("an unknown lambda")?;
             let (unit, l, inst) = (d.unit.ok_or_else(|| format!("the lambda's script {} is gone", d.key))?, d.lambda, d.inst);
             let fnv_script::ir::XExpr::Lambda { params, body, value, .. } = l else { return Err("an unknown lambda".into()) };
@@ -3495,7 +3499,7 @@ impl<'a> Game<'a> {
                 Some(k) => Locals::Instance(k),
                 None => Locals::Temp(d.captured.unwrap_or_default()),
             };
-            (unit, params, body, value.map(|v| *v), locals)
+            (unit, params, std::borrow::Cow::Owned(body), value.map(|v| *v), locals)
         } else {
             let compiled = id.checked_sub(COMPILED_BASE).filter(|_| id < TEMP_REF_BASE).and_then(|i| self.compiled_files.get(i as usize).copied());
             let unit = match compiled {
@@ -3504,7 +3508,7 @@ impl<'a> Game<'a> {
             };
             let block = unit.program.blocks.iter().find(|b| b.event == fnv_script::ir::FUNCTION_BLOCK).ok_or_else(|| format!("{}{NO_FUNCTION_BLOCK}", data.name(FormId(id))))?;
             let params = block.params.iter().flatten().filter_map(|a| if let Arg::Var(v) = a { Some(*v) } else { None }).collect();
-            (unit, params, block.body.clone(), None, Locals::Temp(BTreeMap::new()))
+            (unit, params, std::borrow::Cow::Borrowed(&block.body[..]), None, Locals::Temp(BTreeMap::new()))
         };
         self.udf.push(UdfFrame { value: None, caller });
         self.open_run();
@@ -3526,7 +3530,7 @@ impl<'a> Game<'a> {
                     Err(e) => result = Err(e.to_string()),
                 },
                 None => {
-                    if let Err(e) = vm.run(&body) {
+                    if let Err(e) = vm.run(&body[..]) {
                         result = Err(e.to_string());
                     }
                 }
@@ -6980,7 +6984,20 @@ impl Host for Exec<'_, '_> {
             None => ("implicit", None, None),
         };
         let opcode = match &call.func { fnv_script::ir::FuncId::Opcode(code) => Some(*code), _ => None };
-        tracing::warn!(target: "fnv_game::call_context",
+        // Once per (script, command): a mod's GameMode block asking a weaponless player for
+        // weapon data repeats every frame, and writing the full context each time was 80
+        // lines a second on the Strip (2026-11-19). The first one says everything.
+        {
+            use std::hash::{Hash, Hasher};
+            static WARNED: std::sync::Mutex<Option<std::collections::HashSet<u64>>> = std::sync::Mutex::new(None);
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (&**self.unit.shared_key(), name).hash(&mut h);
+            let mut w = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+            if !w.get_or_insert_with(Default::default).insert(h.finish()) {
+                return;
+            }
+        }
+        tracing::warn!(target: "fnv_game::call_context", repeats = "not logged",
             frame = self.game.frame, unit = %call_context_text(self.unit.shared_key(), 192),
             plugin = %call_context_text(&self.unit.unit.plugin, 96), command = %call_context_text(name, 64),
             opcode = ?opcode, receiver_kind, receiver_form = ?receiver_form, receiver_number_bits = ?receiver_number_bits,

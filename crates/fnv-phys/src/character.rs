@@ -250,6 +250,53 @@ pub struct Character {
     held: Option<Held>,
     /// Steps held so far ([`Self::hold_when_stuck`], a count for reports).
     pub held_steps: u32,
+    /// A step at rest that left the character exactly as it found it ([`Rest`]).
+    rest: Option<Rest>,
+    /// Steps answered from [`Self::rest`] so far (a count for reports).
+    pub rest_steps: u32,
+}
+
+/// How many steps in a row [`PhysWorld::plan_move`] answers from a remembered step at
+/// rest before planning it in full again: a quarter second at 60 Hz, so ground taken away
+/// or a body put against a standing actor is seen within that time.
+const REST_REPLAYS: u8 = 15;
+
+/// A step planned in full for an actor walked with no motion (no velocity, no jump, no
+/// swim stroke) whose state after the step was bit for bit its state before: the same
+/// input from the same state in the same world gives the same step, so the next steps are
+/// answered from it, for at most [`REST_REPLAYS`] steps. On the Strip most of the ~230
+/// actors in the loaded area stand or sit, and planning each one's step in full (casts
+/// for the support, the controller's sweeps) was ~3 ms of the main thread's frame (CPU
+/// sample 2026-11-19).
+#[derive(Debug, Clone)]
+struct Rest {
+    key: RestKey,
+    step: CharacterStep,
+    left: u8,
+}
+
+/// The parts of a character's state a step reads and writes, bit for bit.
+type RestKey = ([u32; 15], crate::layers::LayerSet);
+
+fn rest_key(c: &Character) -> RestKey {
+    let o = |v: Option<f32>| v.map_or(u32::MAX, f32::to_bits);
+    ([
+        c.feet[0].to_bits(),
+        c.feet[1].to_bits(),
+        c.feet[2].to_bits(),
+        c.vertical_speed.to_bits(),
+        c.gap.to_bits(),
+        c.velocity[0].to_bits(),
+        c.velocity[1].to_bits(),
+        c.air_time.to_bits(),
+        o(c.since_landing),
+        o(c.walked_off_z),
+        o(c.air_top_z),
+        o(c.ground_gap),
+        o(c.perch_base),
+        u32::from(c.grounded) | u32::from(c.swimming) << 1 | u32::from(c.air_full) << 2 | u32::from(c.held.is_some()) << 3,
+        u32::from(c.passes_characters),
+    ], c.ignore_layers)
 }
 
 /// A character held where it got stuck ([`Character::hold_when_stuck`]): rapier's
@@ -413,6 +460,8 @@ impl PhysWorld {
             hold_when_stuck: false,
             held: None,
             held_steps: 0,
+            rest: None,
+            rest_steps: 0,
         };
         let body =
             self.insert_body(RigidBodyBuilder::kinematic_position_based().translation(c.center(self.k)).user_data(owner.encode()));
@@ -513,6 +562,32 @@ impl PhysWorld {
     /// about 300 ms of CPU a second moving the characters one by one, CPU profile
     /// 2026-10-23].
     pub fn plan_move(&self, c: &mut Character, input: CharacterInput) -> (CharacterStep, Push) {
+        // An actor walked with no motion: answered from its remembered step at rest when
+        // nothing about it changed since ([`Rest`]). The player is always planned in full.
+        let at_rest = c.hold_when_stuck && c.held.is_none() && input.velocity == [0.0, 0.0] && !input.jump && input.vertical == 0.0;
+        if at_rest {
+            let key = rest_key(c);
+            if let Some(r) = c.rest.as_mut().filter(|r| r.left > 0 && r.key == key) {
+                r.left -= 1;
+                let step = r.step.clone();
+                c.rest_steps += 1;
+                let push = Push { kcc: c.controller(self.k), dt: self.params.dt, ignore: c.ignore_layers, passes: c.passes_characters, collisions: Vec::new() };
+                return (step, push);
+            }
+        }
+        c.rest = None;
+        let before = at_rest.then(|| rest_key(c));
+        let (step, push) = self.plan_move_full(c, input);
+        if let Some(key) = before {
+            if key == rest_key(c) && step.feet == c.feet && push.collisions.is_empty() {
+                c.rest = Some(Rest { key, step: step.clone(), left: REST_REPLAYS });
+            }
+        }
+        (step, push)
+    }
+
+    /// [`Self::plan_move`] without the remembered step at rest.
+    fn plan_move_full(&self, c: &mut Character, input: CharacterInput) -> (CharacterStep, Push) {
         if let Some(held) = self.held_move(c, &input) {
             return held;
         }

@@ -55,6 +55,9 @@ pub struct AnimFolders {
     pub active: HashMap<(FormId, bool), Vec<String>>,
     /// Condition texts that failed, warned about once.
     warned: HashSet<String>,
+    /// Where the spread-out refresh ([`Game::anim_folders_tick`]) goes on next frame: an
+    /// index into the actors list as it stands then.
+    cursor: usize,
 }
 
 /// An entry's `form`: one hex ID or a list of them [observed: both, 254 lists].
@@ -220,14 +223,38 @@ impl Game<'_> {
         v
     }
 
-    /// Read the folders once (when the Data folder is known), then every
-    /// [`REFRESH_FRAMES`] the entries of the player and each actor the engine draws.
+    /// Read the folders once (when the Data folder is known), then check the entries of
+    /// the player and each actor the engine draws once every [`REFRESH_FRAMES`]: a slice of
+    /// the actors each frame, not all of them on one frame. All at once cost ~7 ms every
+    /// 15th frame on the Strip with 162 plugins (230 actors; CPU sample 2026-11-19), a
+    /// stutter four times a second; each actor is still checked four times a second.
     pub(crate) fn anim_folders_tick(&mut self) {
         self.load_anim_folders();
-        if self.anim_folders.entries.is_empty() || self.frame % REFRESH_FRAMES != 1 {
+        if self.anim_folders.entries.is_empty() {
             return;
         }
-        self.refresh_anim_folders();
+        let actors = self.anim_folder_actors();
+        let per_frame = actors.len().div_ceil(REFRESH_FRAMES as usize).max(1);
+        let entries = std::mem::take(&mut self.anim_folders.entries);
+        let start = self.anim_folders.cursor % actors.len();
+        for k in 0..per_frame.min(actors.len()) {
+            let a = actors[(start + k) % actors.len()];
+            self.refresh_actor_folders(&entries, a);
+        }
+        self.anim_folders.cursor = (start + per_frame) % actors.len();
+        self.anim_folders.entries = entries;
+        // Actors no longer drawn keep no stale entries.
+        let live: HashSet<FormId> = actors.into_iter().collect();
+        self.anim_folders.active.retain(|(a, _), _| live.contains(a));
+    }
+
+    /// The actors whose entries are kept: each one the engine animates, and the player.
+    fn anim_folder_actors(&self) -> Vec<FormId> {
+        let mut actors: Vec<FormId> = self.senses.anim.keys().copied().collect();
+        if !actors.contains(&FormId::PLAYER_REF) {
+            actors.push(FormId::PLAYER_REF);
+        }
+        actors
     }
 
     /// Read the folders, once the Data folder is known.
@@ -240,44 +267,47 @@ impl Game<'_> {
 
     /// The entries that hold for each actor now.
     pub fn refresh_anim_folders(&mut self) {
-        let mut actors: Vec<FormId> = self.senses.anim.keys().copied().collect();
-        if !actors.contains(&FormId::PLAYER_REF) {
-            actors.push(FormId::PLAYER_REF);
-        }
+        let actors = self.anim_folder_actors();
         let entries = std::mem::take(&mut self.anim_folders.entries);
-        let mut active = HashMap::new();
+        self.anim_folders.active.clear();
         for a in actors {
-            let base = crate::functions::base_of(self, a);
-            let weapon = crate::functions::items::equipped_weapon(self, a);
-            let mut hold: Vec<&FolderEntry> = Vec::new();
-            for e in &entries {
-                if !e.forms.is_empty() && !e.forms.iter().any(|&f| f == a || Some(f) == base || Some(f) == weapon) {
-                    continue;
-                }
-                if let Some(c) = &e.condition {
-                    match self.evaluate_on(c, Some(a)) {
-                        Ok(true) => {}
-                        Ok(false) => continue,
-                        Err(err) => {
-                            if self.anim_folders.warned.insert(c.clone()) {
-                                tracing::warn!("AnimGroupOverride: {}: condition {c:?}: {err}", e.folder);
-                            }
-                            continue;
-                        }
-                    }
-                }
-                hold.push(e);
-            }
-            hold.sort_by_key(|e| (e.priority, e.order));
-            for first in [false, true] {
-                let files: Vec<String> = hold.iter().flat_map(|e| if first { e.first.iter() } else { e.third.iter() }).cloned().collect();
-                if !files.is_empty() {
-                    active.insert((a, first), files);
-                }
-            }
+            self.refresh_actor_folders(&entries, a);
         }
         self.anim_folders.entries = entries;
-        self.anim_folders.active = active;
+    }
+
+    /// One actor's entries that hold now, put in `active` (or taken out when none hold).
+    fn refresh_actor_folders(&mut self, entries: &[FolderEntry], a: FormId) {
+        let base = crate::functions::base_of(self, a);
+        let weapon = crate::functions::items::equipped_weapon(self, a);
+        let mut hold: Vec<&FolderEntry> = Vec::new();
+        for e in entries {
+            if !e.forms.is_empty() && !e.forms.iter().any(|&f| f == a || Some(f) == base || Some(f) == weapon) {
+                continue;
+            }
+            if let Some(c) = &e.condition {
+                match self.evaluate_on(c, Some(a)) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(err) => {
+                        if self.anim_folders.warned.insert(c.clone()) {
+                            tracing::warn!("AnimGroupOverride: {}: condition {c:?}: {err}", e.folder);
+                        }
+                        continue;
+                    }
+                }
+            }
+            hold.push(e);
+        }
+        hold.sort_by_key(|e| (e.priority, e.order));
+        for first in [false, true] {
+            let files: Vec<String> = hold.iter().flat_map(|e| if first { e.first.iter() } else { e.third.iter() }).cloned().collect();
+            if files.is_empty() {
+                self.anim_folders.active.remove(&(a, first));
+            } else {
+                self.anim_folders.active.insert((a, first), files);
+            }
+        }
     }
 
     /// CopyAnimationsToForm: the folders' entries for `from` are for `to` too, their
