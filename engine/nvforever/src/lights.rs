@@ -162,8 +162,10 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
             patched
         }
     };
-    // `NVF_LIGHT_LOOP_PATCH=0` leaves the loops as Bevy wrote them (an A/B switch).
-    let loops = std::env::var("NVF_LIGHT_LOOP_PATCH").map_or(true, |v| v != "0");
+    // Off by default: measured no gain (Strip, still view, native: 33.5/33.6 ms without,
+    // 33.7/36.8 with, 2026-11-19; the GPU is ALU-bound at 33% fragment occupancy, where a
+    // skipped lane waits for its SIMD group anyway). `NVF_LIGHT_LOOP_PATCH=1` turns it on.
+    let loops = std::env::var("NVF_LIGHT_LOOP_PATCH").is_ok_and(|v| v == "1");
     let patched = match loops.then(|| light_loop_patched(&patched)).flatten() {
         Some(p) => p,
         None if !loops => patched,
