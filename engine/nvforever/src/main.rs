@@ -1296,7 +1296,13 @@ fn main() -> AppExit {
     // above, which wants the overwrite folder first.
     let game = match &mo2 {
         Some(l) => GameData::open_for_plugins_layered(args.data(), &l.mod_roots(), &args.plugins, &args.nif_schema),
-        None => GameData::open_for_plugins_in(args.data(), mods.first().map(|p| p.as_path()), &args.plugins, &args.nif_schema),
+        // The home's mods folder itself: the VFS indexes its one-folder-per-mod layout and
+        // `mods.txt` order (fnv_vfs). Not `mods.first()`: `mods` above is the plugin
+        // lookup's per-mod roots, highest first, and its first entry is one mod's folder.
+        None => {
+            let home_mods = fnv_install::EngineHome::user().map(|h| h.mods());
+            GameData::open_for_plugins_in(args.data(), home_mods.as_deref(), &args.plugins, &args.nif_schema)
+        }
     };
     let game = match game {
         Ok(g) => g,
