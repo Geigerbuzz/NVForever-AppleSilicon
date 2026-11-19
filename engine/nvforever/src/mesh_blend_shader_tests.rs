@@ -690,3 +690,30 @@ fn material_groups_fit_a_16_texture_stage_without_bindless() {
     assert_eq!(capture, 1);
     assert!(capture < ordinary, "the capture's group is smaller than any ordinary NIF shape's");
 }
+
+#[test]
+fn production_lighting_patches_compose_into_the_nif_forward_shader() {
+    // The game's chain on bevy_pbr's pbr_functions (lights.rs: display sum, the sun's
+    // visibility hook, the light loops, the ambient occlusion hook), then the real NIF forward
+    // shader composed with it and validated by naga. A patch that only checks its own text
+    // passed while the composed shader failed to build and nothing was drawn (2026-11-19).
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut modules = vendored_modules();
+    let root = manifest.join("../nvf-assets/src");
+    sources(&root, "nvf_assets", &root, &mut modules);
+    modules.push(("embedded://nvforever/terrain_weights.wesl".into(), include_str!("terrain_weights.wesl").into()));
+    let key = "embedded://bevy_pbr/render/pbr_functions.wesl";
+    let original = crate::lights::unix_lines(&modules.iter().find(|(p, _)| p == key).expect("vendored pbr_functions").1);
+    let patched = crate::lights::display_patched(&original).expect("display edits");
+    let patched = crate::sun_visibility::hook_patched(&patched).expect("sun visibility hook");
+    let patched = crate::lights::light_loop_patched(&patched).expect("light loop edits");
+    let patched = crate::ssao_lighting::hook_patched(&patched).expect("ambient occlusion hook");
+    for m in modules.iter_mut().filter(|(p, _)| p == key) {
+        m.1 = patched.clone();
+    }
+    use nvf_assets::nif_surface_blend::HeightLayout;
+    for bindless in [false, true] {
+        let out = compose(&modules, "embedded://nvf_assets/nif_material.wesl", &nif_defs(bindless, false, false, false, HeightLayout::STORED));
+        assert!(out.contains("nvf_to_light"), "the early-out reaches the composed shader");
+    }
+}

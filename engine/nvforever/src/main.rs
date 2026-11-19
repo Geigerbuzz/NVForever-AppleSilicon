@@ -2454,6 +2454,21 @@ fn setup(mut commands: Commands, start: Res<StartPose>) {
     if start.play {
         commands.entity(cam).insert(nvf_play::PlayerCamera);
     }
+    // Diagnostic only: `NVF_DEBUG_CLUSTERS=<total>,<z slices>` overrides the light clusters'
+    // grid (Bevy's default is 4096 clusters in 24 depth slices: at 3024x1964 about 190 px
+    // tiles, every pixel of which shades each light touching any part of its tile).
+    if let Some((total, z)) = std::env::var("NVF_DEBUG_CLUSTERS").ok().and_then(|v| {
+        let (a, b) = v.split_once(',')?;
+        Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?))
+    }) {
+        info!("lights: cluster grid {total} clusters in {z} depth slices (NVF_DEBUG_CLUSTERS)");
+        commands.entity(cam).insert(bevy::light::cluster::ClusterConfig::FixedZ {
+            total,
+            z_slices: z,
+            z_config: default(),
+            dynamic_resizing: true,
+        });
+    }
     // Hidden with --no-overlay; the settings page can show it.
     commands.spawn((
         Text::new(""),

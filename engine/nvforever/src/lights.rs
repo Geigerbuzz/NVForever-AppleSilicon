@@ -162,6 +162,17 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
             patched
         }
     };
+    // `NVF_LIGHT_LOOP_PATCH=0` leaves the loops as Bevy wrote them (an A/B switch).
+    let loops = std::env::var("NVF_LIGHT_LOOP_PATCH").map_or(true, |v| v != "0");
+    let patched = match loops.then(|| light_loop_patched(&patched)).flatten() {
+        Some(p) => p,
+        None if !loops => patched,
+        None => {
+            error!("{PBR_FUNCTIONS}: the light loops are not as expected (Bevy changed?); every light is shaded at every pixel of its clusters");
+            patched
+        }
+    };
+    let patched = debug_light_cap(patched);
     // The ambient occlusion's hook goes in after the sun's; it too acts only under its
     // shader def (ssao_lighting.rs).
     let (patched, ao_hooked) = match crate::ssao_lighting::hook_patched(&patched) {
@@ -277,8 +288,80 @@ struct LightValues {
     emitting: bool,
 }
 
+/// The point and spot light loops of `apply_pbr_lighting`, after the display edits, made
+/// cheaper without changing a pixel:
+///
+/// - A light whose radius the fragment lies beyond is skipped. The game's attenuation
+///   ([`GAME_ATTENUATION`]) is exactly 0 there and both Bevy's light and the display sum are
+///   multiplied by it; a cluster is coarse (~190 px at 3024x1964), so many of its fragments
+///   are out of a light's reach, and each paid the full specular before the 0. Not with
+///   diffuse transmission, whose second lobe lies elsewhere.
+/// - In a world view Bevy's light is asked for no diffuse: its diffuse colour is 0 there
+///   (the display sum carries the diffuse light, `display_shader`), so Burley's diffuse was
+///   worked out per light and pixel to be multiplied by 0.
+///
+/// On the Strip at night the lights cost ~7 ms of a 33 ms frame at native (2026-11-19).
+/// `None` when an anchor is missing (Bevy changed).
+pub(crate) fn light_loop_patched(source: &str) -> Option<String> {
+    const LOOP_START: &str = "        let light_id = clustering::get_clusterable_object_id(i);\n";
+    const EARLY_OUT: &str = "        let light_id = clustering::get_clusterable_object_id(i);
+        // NVForever (lights.rs light_loop_patched): beyond its radius a light gives nothing.
+        @if(!STANDARD_MATERIAL_DIFFUSE_TRANSMISSION)
+        let nvf_to_light = view_bindings::clustered_lights.data[light_id].position_radius.xyz - in.world_position.xyz;
+        @if(!STANDARD_MATERIAL_DIFFUSE_TRANSMISSION)
+        if dot(nvf_to_light, nvf_to_light) * view_bindings::clustered_lights.data[light_id].color_inverse_square_range.w >= 1.0 {
+            continue;
+        }
+";
+    const POINT: &str = "lighting::point_light(light_id, &lighting_input, enable_diffuse, true);";
+    const SPOT: &str = "lighting::spot_light(light_id, &lighting_input, enable_diffuse);";
+    if source.matches(LOOP_START).count() != 2 || source.matches(POINT).count() != 1 || source.matches(SPOT).count() != 1 || !source.contains("let nvf_display = ") {
+        return None;
+    }
+    Some(
+        source
+            .replace(LOOP_START, EARLY_OUT)
+            .replace(POINT, "lighting::point_light(light_id, &lighting_input, enable_diffuse && !nvf_display, true);")
+            .replace(SPOT, "lighting::spot_light(light_id, &lighting_input, enable_diffuse && !nvf_display);"),
+    )
+}
+
+/// Diagnostic only (off by default): `NVF_DEBUG_LIGHT_CAP=<n>` shades at most the first `n`
+/// point lights and `n` spot lights of each light cluster (in the cluster's order, not the
+/// strongest), to size what a per-pixel light budget could save. The original renders each
+/// object with a few lights (NVR's replacement object shaders take 3, 4 or 6:
+/// `reference-downloads/sources/TESReloaded10/src/hlsl/NewVegas/Shaders/ObjectTemplate.hlsl`
+/// `MAX_LIGHTS`) [documented: that source].
+fn debug_light_cap(source: String) -> String {
+    let Some(n) = std::env::var("NVF_DEBUG_LIGHT_CAP").ok().and_then(|v| v.parse::<u32>().ok()) else {
+        return source;
+    };
+    let point = "            i < clusterable_object_index_ranges.first_spot_light_index_offset;";
+    let spot = "            i < clusterable_object_index_ranges.first_rect_light_index_offset;";
+    let hits = source.matches(point).count() + source.matches(spot).count();
+    let out = source
+        .replace(point, &format!("            i < min(clusterable_object_index_ranges.first_spot_light_index_offset, clusterable_object_index_ranges.first_point_light_index_offset + {n}u);"))
+        .replace(spot, &format!("            i < min(clusterable_object_index_ranges.first_rect_light_index_offset, clusterable_object_index_ranges.first_spot_light_index_offset + {n}u);"));
+    info!("lights: at most {n} point and {n} spot lights per cluster (NVF_DEBUG_LIGHT_CAP; {hits} loop bounds changed)");
+    out
+}
+
+/// Diagnostic only (off by default): `NVF_DEBUG_LIGHTS=off` places no lights of the game's
+/// own (the sun and sky stay), to measure what the placed lights cost the opaque pass.
+fn debug_lights_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("NVF_DEBUG_LIGHTS").is_ok_and(|v| v.eq_ignore_ascii_case("off")))
+}
+
+/// Diagnostic only: `NVF_DEBUG_LIGHT_RADIUS=<factor>` scales every placed light's reach
+/// (1 when unset), to measure how the opaque pass's cost follows the lights' coverage.
+fn debug_light_radius_scale() -> f32 {
+    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| std::env::var("NVF_DEBUG_LIGHT_RADIUS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| *v > 0.0).unwrap_or(1.0))
+}
+
 fn light_values(l: fnv_world::lighting::LightData, instance: &SessionLight) -> LightValues {
-    let radius = placed_light_radius(l.radius, instance.radius_offset);
+    let radius = placed_light_radius(l.radius, instance.radius_offset) * debug_light_radius_scale();
     let shown = if l.color == [0; 3] {
         instance.model_color.unwrap_or([0.0; 3]).map(|v| v.clamp(0.0, 1.0))
     } else {
@@ -579,6 +662,9 @@ pub fn spawn_light(
     placed: &Placement,
     emittance: &mut crate::emittance::EmittanceState,
 ) -> Option<SpawnedLight> {
+    if debug_lights_off() {
+        return None;
+    }
     let l = light_data(world.lo, world.schema, ligh)?;
     let from_model = model.and_then(|m| models.model_light_colour(&format!(r"meshes\{m}")));
     let prepared = model.and_then(|m| models.model(&format!(r"meshes\{m}")));
@@ -594,6 +680,16 @@ pub fn spawn_light(
         seen: None,
     };
     let values = light_values(l, &instance);
+    if std::env::var_os("NVF_DEBUG_LIGHT_LIST").is_some() {
+        // Diagnostic only: one line per placed light, for finding the lights that cover a
+        // view (which plugin's light, how far it reaches, how bright).
+        info!(
+            "light list: ref {:08X} base {:08X} at ({:.0}, {:.0}, {:.0}) radius {:.0} intensity {:.0} emitting {} ref plugin {} base plugin {}",
+            placed.form_id, ligh, at.x, at.y, at.z, values.radius, values.intensity, values.emitting,
+            world.lo.winner(placed.form_id).map_or("?", |(p, _)| p.name.as_str()),
+            world.lo.winner(ligh).map_or("?", |(p, _)| p.name.as_str())
+        );
+    }
     let shown = values.shown;
     let model_driven = model_driven.map(|light| ModelDrivenLight { reference: placed.form_id, light, root: None });
     let color = display_color(shown);
@@ -720,6 +816,25 @@ mod tests {
         assert!(patched.contains("let F = select(fresnel(F0, LdotH), F0,"));
         // The anisotropic and transmission callers keep Bevy's Fresnel.
         assert!(patched.contains("let Fa = fresnel(F0, LdotH);"));
+    }
+
+    #[test]
+    fn light_loops_skip_out_of_range_lights_and_dead_diffuse_in_the_real_shader() {
+        // The vendored bevy_pbr's own text, as the game patches it at start.
+        let source = unix_lines(include_str!("../../vendor/bevy_pbr/src/render/pbr_functions.wesl"));
+        let displayed = display_patched(&source).expect("display anchors in the vendored shader");
+        let out = light_loop_patched(&displayed).expect("light loop anchors in the vendored shader");
+        assert_eq!(out.matches("if dot(nvf_to_light, nvf_to_light) * view_bindings::clustered_lights.data[light_id].color_inverse_square_range.w >= 1.0 {").count(), 2, "point and spot loops");
+        assert_eq!(out.matches("continue;").count(), source.matches("continue;").count() + 2);
+        assert!(out.contains("lighting::point_light(light_id, &lighting_input, enable_diffuse && !nvf_display, true);"));
+        assert!(out.contains("lighting::spot_light(light_id, &lighting_input, enable_diffuse && !nvf_display);"));
+        // The transmissive calls keep their diffuse: their input is not the display view's.
+        assert!(out.contains("lighting::point_light(light_id, &transmissive_lighting_input, enable_diffuse, true);"));
+        // The early-out comes before the light is worked out, in each loop.
+        let first_skip = out.find("nvf_to_light").unwrap();
+        assert!(first_skip < out.find("enable_diffuse && !nvf_display, true)").unwrap());
+        // Without the display edits (no `nvf_display`) it is refused rather than half done.
+        assert!(light_loop_patched(&source).is_none());
     }
 
     #[test]
