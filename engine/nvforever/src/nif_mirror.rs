@@ -61,10 +61,6 @@ struct Memory {
     props: HashMap<String, HashMap<String, Props>>,
     /// Each model's node tree as its file holds it, for items drawn as flat shapes.
     files: HashMap<String, Vec<FileNode>>,
-    /// The node/transform hash last published, per reference and view. A tree whose nodes
-    /// and transforms did not change is not rebuilt: the mirror rebuilt all ~100 watched
-    /// references every frame, the profile's `nif_mirror.tree`.
-    tree_hash: HashMap<(u32, ModelView), u64>,
 }
 
 /// A node of a model file: its name, its parent's index, its local transform.
@@ -474,9 +470,8 @@ fn mirror_game(
     (globals, boxes, mut particles, world): Extra,
     dropped: Dropped,
 ) {
-    let Memory { logged, held, bound_held, pending_held, edit_order, tables, materials, owned, attachment_materials, props, files, tree_hash } = mem;
+    let Memory { logged, held, bound_held, pending_held, edit_order, tables, materials, owned, attachment_materials, props, files } = mem;
     game.scene.use_separate_player_models();
-    let _edits = bevy::log::info_span!("nif_mirror.edits").entered();
     let edits = game.scene.take_targeted_edits();
     let mut edits_rest = Vec::new();
     for queued in edits {
@@ -489,9 +484,6 @@ fn mirror_game(
             SceneEdit::ForModel { .. } => continue,
         };
         let view = concrete_view(r.0, view);
-        // An edit can change what the published tree says (a material, a name, a node), so
-        // the next build must not be skipped by the unchanged-transform hash.
-        tree_hash.remove(&(r.0, view));
         // File-only publications deliberately keep their original legacy contract:
         // transforms are remembered even when no RefVisual root can be resolved,
         // and non-transforms still reach the original name-based handlers below.
@@ -684,35 +676,26 @@ fn mirror_game(
             }
         }
     }
-    drop(_edits);
-    // Resolve a reference's root and rig once a frame: `rig_names` clones a String per bone,
-    // and the holds below asked for it once per entry (hundreds), which the profile showed
-    // as most of `nif_mirror.keys`.
-    let mut root_cache: HashMap<(u32, ModelView), Option<Entity>> = HashMap::new();
-    let mut rig_cache: HashMap<(u32, ModelView), RigNames> = HashMap::new();
     // The held transforms, over this frame's pose.
     let keys: Vec<(u32, ModelView, String)> = held.keys().cloned().collect();
-    let _keys = bevy::log::info_span!("nif_mirror.keys").entered();
     for (r, view, node) in keys {
-        let root = *root_cache.entry((r, view)).or_insert_with(|| root_of(r, view, &rigs, &visuals));
-        let Some(root) = root else { continue };
-        let rig = rig_cache.entry((r, view)).or_insert_with(|| rig_names(r, view, &rigs));
+        let Some(root) = root_of(r, view, &rigs, &visuals) else { continue };
+        let rig = rig_names(r, view, &rigs);
         let h = held[&(r, view, node.clone())];
-        apply_held(root, &node, h, &mut nodes, rig);
+        apply_held(root, &node, h, &mut nodes, &rig);
     }
     // Name-based startup holds acquire a model as soon as it exists. They may
     // wait for a late child only in that model, then become concrete node holds.
     pending_held.retain(|&(r, view, ref name), pending| {
-        let root = *root_cache.entry((r, view)).or_insert_with(|| root_of(r, view, &rigs, &visuals));
-        let Some(root) = root else { return pending.model.is_none() };
+        let Some(root) = root_of(r, view, &rigs, &visuals) else { return pending.model.is_none() };
         if nodes.get(root).is_err() { return pending.model.is_none() }
         let model = root.to_bits();
         if pending.model.is_some_and(|captured| captured != model) { return false }
         pending.model = Some(model);
-        let rig = rig_cache.entry((r, view)).or_insert_with(|| rig_names(r, view, &rigs));
-        let Some(entity) = find(root, name, &nodes, rig) else { return true };
+        let rig = rig_names(r, view, &rigs);
+        let Some(entity) = find(root, name, &nodes, &rig) else { return true };
         let identity = SceneIdentity { model, node: entity.to_bits() };
-        if bound_entity(root, identity, &nodes, rig).is_none() { return true }
+        if bound_entity(root, identity, &nodes, &rig).is_none() { return true }
         let value = bound_held.entry((r, view, identity)).or_default();
         merge_held(value, pending.value);
         false
@@ -720,10 +703,9 @@ fn mirror_game(
     // An edit holds over animation only while this exact model/node lives. A
     // disappearance, immediate root replacement, child ABA or subtree departure expires it.
     bound_held.retain(|&(r, view, identity), value| {
-        let root = *root_cache.entry((r, view)).or_insert_with(|| root_of(r, view, &rigs, &visuals));
-        let Some(root) = root else { return false };
-        let rig = rig_cache.entry((r, view)).or_insert_with(|| rig_names(r, view, &rigs));
-        let Some(entity) = bound_entity(root, identity, &nodes, rig) else { return false };
+        let Some(root) = root_of(r, view, &rigs, &visuals) else { return false };
+        let rig = rig_names(r, view, &rigs);
+        let Some(entity) = bound_entity(root, identity, &nodes, &rig) else { return false };
         apply_value(entity, value.value, &mut nodes);
         true
     });
@@ -749,8 +731,6 @@ fn mirror_game(
             }
         }
     }
-    drop(_keys);
-    let _models = bevy::log::info_span!("nif_mirror.models").entered();
     for r in watched {
         if let Some(model) = drawn_flat(r.0, &dropped) {
             let Some(d) = data.as_deref() else { continue };
@@ -808,46 +788,19 @@ fn mirror_game(
             // from MODL/placed systems of the reference is unavailable for that rig.
             let model = if view == ModelView::FirstPerson { None }
                 else { fnv_game::nif_blocks::model_of(game, r) };
-            // Borrow the cached tables: they were cloned whole for every watched model on
-            // every frame, which is what the profile shows as most of `nif_mirror::mirror`.
             let table = match (data.as_deref(), model.as_deref()) {
-                (Some(d), Some(model)) => {
-                    let t = tables.entry(model.to_string()).or_insert_with(|| material_table(d, model));
-                    Some(&*t)
-                }
-                _ => None,
+                (Some(d), Some(model)) => tables.entry(model.to_string()).or_insert_with(|| material_table(d, model)).clone(),
+                _ => HashMap::new(),
             };
             let props = match (data.as_deref(), model.as_deref()) {
-                (Some(d), Some(model)) => {
-                    let p = props.entry(model.to_string()).or_insert_with(|| property_table(d, model));
-                    Some(&*p)
-                }
-                _ => None,
+                (Some(d), Some(model)) => props.entry(model.to_string()).or_insert_with(|| property_table(d, model)).clone(),
+                _ => HashMap::new(),
             };
             let systems: Vec<(String, Option<String>, [f32; 21])> = if view == ModelView::FirstPerson { Vec::new() } else { particles
                 .as_deref_mut()
                 .map(|p| crate::particles::placed_systems(p, r.0).into_iter().map(|d| (d.name.clone(), d.emitter.object.clone(), crate::particles::script_values(d))).collect())
                 .unwrap_or_default() };
-            let _tree = bevy::log::info_span!("nif_mirror.tree").entered();
             let walked = walk(root, &nodes, &rig);
-            // Publish only when the nodes or their transforms changed: ~100 references are
-            // watched, most static, and rebuilding every tree every frame was the profile's
-            // `nif_mirror.tree`. Edits clear this hash, so nothing a script sets is skipped.
-            let mut tree_now = 0u64;
-            for &(e, _) in &walked {
-                tree_now ^= (e.to_bits()).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                if let Ok((_, t, ..)) = nodes.get(e) {
-                    for v in [t.translation.x, t.translation.y, t.translation.z,
-                              t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w,
-                              t.scale.x, t.scale.y, t.scale.z] {
-                        tree_now = tree_now.rotate_left(7) ^ (v.to_bits() as u64);
-                    }
-                }
-            }
-            if tree_hash.get(&(r.0, view)) == Some(&tree_now) {
-                continue;
-            }
-            tree_hash.insert((r.0, view), tree_now);
             let tree: Vec<SceneNode> = walked
                 .iter()
                 .enumerate()
@@ -862,9 +815,9 @@ fn mirror_game(
                     let (z, y, x) = t.rotation.to_euler(EulerRot::ZYX);
                     let material = if let Some(attached) = attached { attachment_materials.get(&e).copied().or(attached.material) }
                         else if view == ModelView::FirstPerson { None }
-                        else { materials.get(&(r.0, view, shown.clone())).or_else(|| table.and_then(|t| t.get(&base))).copied() };
+                        else { materials.get(&(r.0, view, shown.clone())).or_else(|| table.get(&base)).copied() };
                     let (alpha, stencil) = attached.map(|n| (n.source.alpha, n.source.stencil))
-                        .unwrap_or_else(|| props.and_then(|p| p.get(&base)).copied().unwrap_or_default());
+                        .unwrap_or_else(|| props.get(&base).copied().unwrap_or_default());
                     let emitter = if attached.is_some() { None } else { systems.iter().find(|(n, o, _)| n.eq_ignore_ascii_case(&base) || o.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(&base))).map(|s| s.2) };
                     let info = NodeInfo { identity: Some(SceneIdentity { model: root.to_bits(), node: e.to_bits() }), bound: node_bound(k, &walked, &globals, &boxes), emitter, alpha, stencil };
                     Some(SceneNode {
@@ -882,18 +835,12 @@ fn mirror_game(
             if logged.insert(r.0 | 0x8000_0000) {
                 info!("nif mirror: {:08X} told, {} nodes, first {:?}", r.0, tree.len(), tree.iter().take(4).map(|n| n.name.as_str()).collect::<Vec<_>>());
             }
-            drop(_tree);
-            {
-                let _publish = bevy::log::info_span!("nif_mirror.publish").entered();
-                game.scene.set_identified_model_for(r, view, root.to_bits(), tree);
-            }
+            game.scene.set_identified_model_for(r, view, root.to_bits(), tree);
         }
     }
     // The vertices of the shapes scripts asked about (SUP's NifBlockGetVerticles), in the
     // shape's own space as its mesh holds them; none for a mesh kept on the GPU only
     // [hypothesis: a skinned shape's are its bind pose].
-    drop(_models);
-    let _verts = bevy::log::info_span!("nif_mirror.vertices").entered();
     let wanted: Vec<(FormId, String)> = game.scene.wanted_vertices().cloned().collect();
     for (r, node) in wanted {
         let view = concrete_view(r.0, ModelView::Reference);
@@ -908,7 +855,6 @@ fn mirror_game(
             });
         game.scene.set_vertices(r, &node, verts);
     }
-    drop(_verts);
 }
 
 

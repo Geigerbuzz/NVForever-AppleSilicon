@@ -5341,7 +5341,6 @@ impl<'a> Game<'a> {
     /// `od_09a_disabled_ref_script`, a disabled skull's timer kept falling]. OnLoad at a cell
     /// load runs for disabled references too (`Game::set_loaded`).
     fn active_refs(&self) -> Vec<FormId> {
-        let _span = tracing::info_span!("script::active_refs").entered();
         self.scripted_refs_in(&self.loaded_cells)
     }
 
