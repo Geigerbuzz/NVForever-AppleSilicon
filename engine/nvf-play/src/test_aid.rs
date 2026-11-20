@@ -458,7 +458,13 @@ fn take_due<T: Clone>(due: &mut Vec<(f32, T)>, now: f32) -> Vec<T> {
 /// sets `NVF_PLAY_TEST_UNATTENDED`, which does nothing but drive the run: `drives_run` looks
 /// at the name alone, so any value counts, and a load's new run drops it like any driving
 /// aid (`profile-slow-frames`).
-pub const MEASURING_AIDS: [&str; 9] = [
+pub const MEASURING_AIDS: [&str; 13] = [
+    // Frame telemetry only records frame times (nvforever frame_telemetry): a run played by
+    // hand with it must still capture the mouse (owner, 2026-11-20).
+    "NVF_PLAY_TEST_FRAME_TELEMETRY",
+    "NVF_PLAY_TEST_FRAME_TELEMETRY_GPU",
+    "NVF_PLAY_TEST_FRAME_TELEMETRY_RUN_ID",
+    "NVF_PLAY_TEST_FRAME_TELEMETRY_SCENARIO_ID",
     "NVF_PLAY_TEST_SAMPLE",
     "NVF_PLAY_TEST_PROFILE",
     "NVF_PLAY_TEST_PROFILE_COUNTS",

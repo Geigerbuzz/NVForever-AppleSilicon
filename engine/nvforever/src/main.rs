@@ -24,6 +24,7 @@ macro_rules! eprintln {
 }
 
 mod thread_qos;
+mod tri_count;
 mod activators;
 mod fos_start;
 mod reports;
@@ -1773,6 +1774,7 @@ fn main() -> AppExit {
             }),
     )
     .add_plugins(thread_qos::ThreadQosPlugin)
+    .add_plugins(tri_count::TriCountPlugin)
     .add_plugins((window_icon::WindowIconPlugin, window_mode::WindowModePlugin))
     .add_plugins(nvf_play::audio_out::AudioOutPlugin)
     .add_plugins((ArchivePlugin(game), lights::LightsPlugin, fog::FogPlugin, haze::HazePlugin, eye_adapt::EyeAdaptPlugin, emittance::EmittancePlugin, water::WaterPlugin, tree::TreePlugin, terrain::TerrainPlugin, reflection::ReflectionPlugin, ripples::RipplesPlugin))
