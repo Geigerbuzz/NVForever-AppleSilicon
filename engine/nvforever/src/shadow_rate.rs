@@ -195,6 +195,16 @@ pub const PERFORMANCE_SCHEDULE: [(u32, u32); 3] = [(2, 0), (2, 0), (4, 1)];
 /// the coarsest, so a moving thing's shadow there moving at a quarter of the frame rate
 /// shows least.
 pub const STAGGERED_SCHEDULE: [(u32, u32); 4] = [(1, 0), (2, 1), (4, 2), (4, 0)];
+/// A single cascade (the moon's, by night) drawn every other frame (2026-11-20, owner:
+/// optimise, the look need not match): about 1.9 ms of GPU a frame at the native Strip by
+/// night (Metal trace: 1.2 ms vertex, 0.7 ms fragment), halved; a moving thing's moon
+/// shadow moves at half the frame rate. `NVF_NIGHT_SHADOW_EVERY_FRAME=1` draws it every frame.
+pub const NIGHT_SCHEDULE: [(u32, u32); 1] = [(2, 0)];
+
+fn night_halved() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NVF_NIGHT_SHADOW_EVERY_FRAME").map_or(true, |v| v != "1"))
+}
 
 /// The cascades (a bit each, nearest first) whose maps frame `frame` keeps from an earlier
 /// frame under `schedule`, of `cascades` cascades.
@@ -289,6 +299,9 @@ pub(crate) fn hold_cascades(
     };
     let lights: Vec<Lit> = all_lights.iter().filter(|(_, l, _, _)| l.shadow_maps_enabled).map(|(e, _, c, config)| (e, c, config)).collect();
     let count = lights.iter().flat_map(|(_, c, _)| c.cascades.values().map(Vec::len)).max().unwrap_or(0);
+    // By night the moon casts one cascade, which the staggered schedule draws every frame:
+    // draw it every other frame instead ([`NIGHT_SCHEDULE`]).
+    let schedule: &[(u32, u32)] = if count == 1 && !schedule.is_empty() && !on.0 && night_halved() { &NIGHT_SCHEDULE } else { schedule };
     // A new map size makes new maps: nothing to keep.
     let same_maps = !map.is_some_and(|m| m.is_changed());
     let mut mask = held_mask(schedule, *frame, count);
