@@ -589,7 +589,8 @@ pub(crate) struct AoPipelines {
     occlusion_base: RenderPipelineDescriptor,
     apply_base: RenderPipelineDescriptor,
     /// Occlusion pipeline by multisampling; apply pipeline by target format and it.
-    occlusion: HashMap<bool, CachedRenderPipelineId>,
+    /// By (multisampled, the game's own variant: AO_FIXED in ssao.wesl).
+    occlusion: HashMap<(bool, bool), CachedRenderPipelineId>,
     apply: HashMap<(TextureFormat, bool), CachedRenderPipelineId>,
     multiply_base: RenderPipelineDescriptor,
     /// Before FSR: the factor multiplied into FSR's HDR input and its opaque copy (queued
@@ -600,7 +601,7 @@ pub(crate) struct AoPipelines {
     /// needs one).
     denoise_layouts: [BindGroupLayoutDescriptor; 2],
     denoise_base: RenderPipelineDescriptor,
-    denoise: HashMap<bool, CachedRenderPipelineId>,
+    denoise: HashMap<(bool, bool), CachedRenderPipelineId>,
 }
 
 /// A view's pipelines, whether its depth is multisampled, and its occlusion texture.
@@ -836,15 +837,19 @@ fn init_pipelines(mut commands: Commands, device: Res<RenderDevice>, assets: Res
     });
 }
 
-/// A pipeline of `base` drawing into an [`OCCLUSION_FORMAT`] texture, with `layout` and the
-/// `MULTISAMPLED` def for a multisampled depth.
-fn occlusion_format_pipeline(base: &RenderPipelineDescriptor, layout: &BindGroupLayoutDescriptor, multi: bool) -> RenderPipelineDescriptor {
+/// A pipeline of `base` drawing into an [`OCCLUSION_FORMAT`] texture, with `layout`, the
+/// `MULTISAMPLED` def for a multisampled depth and `AO_FIXED` when the view runs the game's
+/// own variant ([`LIGHTING_VARIANT`]: ssao.wesl reads it as constants then).
+fn occlusion_format_pipeline(base: &RenderPipelineDescriptor, layout: &BindGroupLayoutDescriptor, multi: bool, fixed: bool) -> RenderPipelineDescriptor {
     let mut d = base.clone();
     d.layout = vec![layout.clone()];
     if let Some(f) = d.fragment.as_mut() {
         f.targets = vec![Some(ColorTargetState { format: OCCLUSION_FORMAT, blend: None, write_mask: ColorWrites::ALL })];
         if multi {
             f.shader_defs.push("MULTISAMPLED".into());
+        }
+        if fixed {
+            f.shader_defs.push("AO_FIXED".into());
         }
     }
     d
@@ -883,12 +888,14 @@ fn prepare(
             pipelines.multiply = Some(cache.queue_render_pipeline(pipelines.multiply_base.clone()));
         }
         let multi = msaa.samples() > 1;
+        // The game's own variant: its slices, steps and remedies compiled as constants.
+        let fixed = settings.variant == LIGHTING_VARIANT.uniform();
         let format = view.target_format;
-        let occlusion = match pipelines.occlusion.get(&multi) {
+        let occlusion = match pipelines.occlusion.get(&(multi, fixed)) {
             Some(id) => *id,
             None => {
-                let id = cache.queue_render_pipeline(occlusion_format_pipeline(&pipelines.occlusion_base, &pipelines.occlusion_layouts[multi as usize], multi));
-                pipelines.occlusion.insert(multi, id);
+                let id = cache.queue_render_pipeline(occlusion_format_pipeline(&pipelines.occlusion_base, &pipelines.occlusion_layouts[multi as usize], multi, fixed));
+                pipelines.occlusion.insert((multi, fixed), id);
                 id
             }
         };
@@ -926,11 +933,11 @@ fn prepare(
         // In the lighting: the denoised texture, bound for this frame's main pass (before
         // RenderSystems::PrepareBindGroups, as bevy_pbr allows), and the uniform.
         let lighting = bindings.map(|mut b| {
-            let denoise = match pipelines.denoise.get(&multi) {
+            let denoise = match pipelines.denoise.get(&(multi, fixed)) {
                 Some(id) => *id,
                 None => {
-                    let id = cache.queue_render_pipeline(occlusion_format_pipeline(&pipelines.denoise_base, &pipelines.denoise_layouts[multi as usize], multi));
-                    pipelines.denoise.insert(multi, id);
+                    let id = cache.queue_render_pipeline(occlusion_format_pipeline(&pipelines.denoise_base, &pipelines.denoise_layouts[multi as usize], multi, fixed));
+                    pipelines.denoise.insert((multi, fixed), id);
                     id
                 }
             };
@@ -1179,10 +1186,10 @@ mod tests {
     use super::*;
 
     /// ssao.wesl as the game's WESL loader would hand it to naga for one value of the
-    /// `MULTISAMPLED` condition: the two imports replaced by stand-ins of the same signature
-    /// (Bevy's fullscreen vertex output; nvf_assets' `unsqueeze`, its body left out), the
-    /// conditional bindings resolved.
-    fn resolved_shader(multisampled: bool) -> String {
+    /// `MULTISAMPLED` and `AO_FIXED` conditions: the two imports replaced by stand-ins of the
+    /// same signature (Bevy's fullscreen vertex output; nvf_assets' `unsqueeze`, its body
+    /// left out), the conditional lines resolved.
+    fn resolved_shader(multisampled: bool, fixed: bool) -> String {
         let source = include_str!("ssao.wesl").replace("\r\n", "\n");
         let mut out = String::from(
             "struct FullscreenVertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };\nfn unsqueeze(d: f32) -> f32 { return d; }\n",
@@ -1201,6 +1208,16 @@ mod tests {
                     continue;
                 }
                 rest
+            } else if let Some(rest) = line.strip_prefix("@if(AO_FIXED) ") {
+                if !fixed {
+                    continue;
+                }
+                rest
+            } else if let Some(rest) = line.strip_prefix("@if(!AO_FIXED) ") {
+                if fixed {
+                    continue;
+                }
+                rest
             } else {
                 line
             };
@@ -1214,12 +1231,13 @@ mod tests {
     #[test]
     fn the_shader_is_valid_wgsl_with_either_depth() {
         use wgpu::naga;
-        for multisampled in [false, true] {
-            let source = resolved_shader(multisampled);
-            let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("multisampled {multisampled}: {}", e.emit_to_string(&source)));
+        // The game's own variant compiled as constants (AO_FIXED) and read from the uniform.
+        for (multisampled, fixed) in [(false, false), (true, false), (false, true), (true, true)] {
+            let source = resolved_shader(multisampled, fixed);
+            let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("multisampled {multisampled} fixed {fixed}: {}", e.emit_to_string(&source)));
             naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
                 .validate(&module)
-                .unwrap_or_else(|e| panic!("multisampled {multisampled}: {e:?}"));
+                .unwrap_or_else(|e| panic!("multisampled {multisampled} fixed {fixed}: {e:?}"));
             for entry in ["occlusion", "apply", "multiply", "denoise"] {
                 assert!(module.entry_points.iter().any(|e| e.name == entry), "entry point {entry}");
             }

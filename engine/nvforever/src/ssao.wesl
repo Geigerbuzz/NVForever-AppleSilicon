@@ -126,6 +126,18 @@ const VARIANT_THIN: u32 = 8u;
 // nearest sample holds the leaf wherever any sample does, the same share everywhere; on a
 // plane it is the same corner of every pixel, so the neighbouring depths stay a plane.
 const VARIANT_NEAREST: u32 = 16u;
+
+// The variant this pass runs (2026-11-20). With AO_FIXED (ssao.rs: the view runs the
+// game's own variant, LIGHTING_VARIANT: soft + thin, the default slices and steps) these
+// are constants, so the loops have fixed bounds and the other remedies' branches are not in
+// the shader; otherwise they come from the uniform (NVF_PLAY_DEBUG_AO_VARIANT, the old
+// estimate, the post placement).
+@if(AO_FIXED) fn variant_flags() -> u32 { return VARIANT_SOFT | VARIANT_THIN; }
+@if(!AO_FIXED) fn variant_flags() -> u32 { return u32(ao.variant.z); }
+@if(AO_FIXED) fn variant_slices() -> i32 { return SLICES; }
+@if(!AO_FIXED) fn variant_slices() -> i32 { return select(SLICES, i32(ao.variant.x), ao.variant.x > 0.5); }
+@if(AO_FIXED) fn variant_steps() -> i32 { return STEPS; }
+@if(!AO_FIXED) fn variant_steps() -> i32 { return select(STEPS, i32(ao.variant.y), ao.variant.y > 0.5); }
 // How plane-less the neighbourhood is, from the plane-aware weights of the 16 texels: 1 at
 // or below SPARSE_FULL (where today's weights have gone over to the distance's fallback
 // wholly), 0 from SPARSE_NONE (half the texels on the plane). A leaf card is a plane of
@@ -148,7 +160,7 @@ fn dims() -> vec2<i32> {
 // first-person arms and weapon at the depth they were squeezed from (nvf_assets
 // nif_material.rs "First-person depth").
 fn depth_at(p: vec2<i32>) -> f32 {
-    if (u32(ao.variant.z) & VARIANT_NEAREST) != 0u {
+    if (variant_flags() & VARIANT_NEAREST) != 0u {
         return nearest_depth_at(p);
     }
     return unsqueeze(textureLoad(depth, clamp(p, vec2(0), dims() - 1), 0));
@@ -328,9 +340,9 @@ fn gtao_visibility(half: vec2<i32>, c: vec2<f32>, p: vec3<f32>, n: vec3<f32>, on
     // The variants' slice and step counts (NVF_PLAY_DEBUG_AO_VARIANT); SLICES and STEPS
     // otherwise. The slices stay evenly spread over the half turn: slice k of n at
     // (k + turn) pi / n, the sixteen turns between them.
-    let slices = select(SLICES, i32(ao.variant.x), ao.variant.x > 0.5);
-    let steps = select(STEPS, i32(ao.variant.y), ao.variant.y > 0.5);
-    let thin = (u32(ao.variant.z) & VARIANT_THIN) != 0u;
+    let slices = variant_slices();
+    let steps = variant_steps();
+    let thin = (variant_flags() & VARIANT_THIN) != 0u;
     for (var k = 0; k < slices; k++) {
         let phi = (f32(k) + turn) * PI / f32(slices);
         // The slice's direction on the screen (pixels, y down) and in view space (y up).
@@ -532,7 +544,7 @@ fn openness_at(px: vec2<i32>, d: f32) -> f32 {
     let sum_weight = mix(dist_weight, weight, planar);
     let open = select(nearest, sum / sum_weight, sum_weight > 0.0);
     // The candidate remedies for plants (NVF_PLAY_DEBUG_AO_VARIANT); none by default.
-    let flags = u32(ao.variant.z);
+    let flags = variant_flags();
     if (flags & (VARIANT_WIDE | VARIANT_WIDE6 | VARIANT_SOFT)) == 0u {
         return open;
     }
