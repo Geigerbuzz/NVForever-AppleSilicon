@@ -1694,10 +1694,28 @@ impl crate::CommandEncoder for super::CommandEncoder {
         autoreleasepool(|_| {
             // TimeStamp Queries and ComputePassDescriptor were both introduced in Metal 2.3 (macOS 11, iOS 14)
             // and we currently only need ComputePassDescriptor for timestamp queries
+            // NVForever: a pass whose label ends in " [concurrent]" lets its dispatches run
+            // concurrently (MTLDispatchTypeConcurrent = 1): the caller promises they touch
+            // disjoint memory. Bevy's per-batch-set bookkeeping passes (gpu_preprocess.rs)
+            // dispatch thousands of tiny independent jobs that Metal's default serial type
+            // ran one after another (~7 ms of GPU a frame at the native Strip, 2026-11-20).
+            // `NVF_METAL_CONCURRENT=0` keeps every pass serial (for measuring against).
+            static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let allowed = *ALLOWED.get_or_init(|| !std::env::var("NVF_METAL_CONCURRENT").is_ok_and(|v| v == "0"));
+            let concurrent = allowed && desc.label.is_some_and(|l| l.ends_with(" [concurrent]"));
             let encoder = if self.shared.private_caps.timestamp_query_support.is_empty() {
-                raw.computeCommandEncoder().unwrap()
+                if concurrent {
+                    let e: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> =
+                        unsafe { objc2::msg_send![raw, computeCommandEncoderWithDispatchType: 1usize] };
+                    e.unwrap()
+                } else {
+                    raw.computeCommandEncoder().unwrap()
+                }
             } else {
                 let descriptor = MTLComputePassDescriptor::new();
+                if concurrent {
+                    let _: () = unsafe { objc2::msg_send![&descriptor, setDispatchType: 1usize] };
+                }
 
                 let mut sba_index = 0;
                 let mut next_sba_descriptor = || {

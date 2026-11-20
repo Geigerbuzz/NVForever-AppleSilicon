@@ -15,7 +15,9 @@ struct Meter {
 @group(0) @binding(1) var<uniform> meter: Meter;
 
 // Taps per side of each mask pixel.
-const TAPS: i32 = 4;
+// 2 since 2026-11-20 (was 4: 16 scattered full-resolution depth reads a mask pixel, 0.8 ms
+// at native in a Metal trace); the metering only needs a rough world-or-sky share.
+const TAPS: i32 = 2;
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {

@@ -635,75 +635,91 @@ pub fn allocate_uniforms(
         return;
     };
 
-    let command_encoder = render_context.command_encoder();
-    let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("uniform allocation"),
-        timestamp_writes: None,
-    });
-
-    let pass_span = diagnostics.pass_span(&mut compute_pass, "uniform_allocation");
-
-    // Gather up all views.
+    // NVForever: the three scan steps as three passes, each over every batch set, instead of
+    // one pass that ran each batch set's steps in turn. A batch set's steps still run in
+    // order (a pass ends before the next begins), and within a pass the batch sets touch
+    // disjoint memory (their own fan buffer and their own range of the indirect parameters'
+    // metadata, allocate_uniforms.wesl), so each pass may dispatch concurrently
+    // (wgpu-hal metal command.rs " [concurrent]"): Metal's serial default ran the thousands
+    // of tiny dispatches one after another, ~5 ms of GPU a frame at the native Strip.
     let view_entity = current_view.entity();
     let shadow_cascade_views = current_view.into_inner();
     let all_views =
         gather_shadow_cascades_for_view(view_entity, shadow_cascade_views, &light_query, hold_directional.as_deref());
 
-    // Loop over each view…
+    // Every (bind group, local scan workgroups) to run, in the order the views and phases give.
+    let mut jobs = Vec::new();
     for view_entity in all_views {
         let Ok(view) = view_query.get(view_entity) else {
             continue;
         };
-
-        // …and each phase within each view.
         for phase_type_id in batched_instance_buffers.phase_instance_buffers.keys() {
             let uniform_allocation_buffers_key = SceneUnpackingBuffersKey {
                 phase: *phase_type_id,
                 view: view.retained_view_entity,
             };
-
-            // Fetch the bind groups for this (view, phase) combination.
             let Some(phase_uniform_allocation_bind_groups) =
                 uniform_allocation_bind_groups.get(&uniform_allocation_buffers_key)
             else {
                 continue;
             };
-
-            // Invoke the shader for all batch sets corresponding to indexed
-            // meshes and then for all batch sets corresponding to
-            // non-indexed meshes.
             for uniform_allocation_bind_group in phase_uniform_allocation_bind_groups
                 .indexed
                 .iter()
                 .chain(phase_uniform_allocation_bind_groups.non_indexed.iter())
             {
-                // Invoke the local scan (step 1).
-                compute_pass.set_pipeline(uniform_allocation_local_scan_pipeline);
-                compute_pass.set_bind_group(0, &uniform_allocation_bind_group.bind_group, &[]);
                 let local_scan_workgroup_count = uniform_allocation_bind_group
                     .bin_count
                     .div_ceil(UNIFORM_ALLOCATION_WORKGROUP_SIZE);
                 if local_scan_workgroup_count > 0 {
-                    compute_pass.dispatch_workgroups(local_scan_workgroup_count, 1, 1);
-                }
-
-                // If there are 256 or fewer draws in this batch, we're
-                // done. Otherwise, perform the other two steps.
-                if local_scan_workgroup_count > 1 {
-                    // Invoke the global scan (step 2).
-                    compute_pass.set_pipeline(uniform_allocation_global_scan_pipeline);
-                    compute_pass.dispatch_workgroups(1, 1, 1);
-
-                    // Perform the fan operation (step 3).
-                    compute_pass.set_pipeline(uniform_allocation_fan_pipeline);
-                    let fan_workgroup_count = local_scan_workgroup_count - 1;
-                    compute_pass.dispatch_workgroups(fan_workgroup_count, 1, 1);
+                    jobs.push((&uniform_allocation_bind_group.bind_group, local_scan_workgroup_count));
                 }
             }
         }
     }
 
-    pass_span.end(&mut compute_pass);
+    let command_encoder = render_context.command_encoder();
+
+    // Step 1: the local scans.
+    {
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("uniform allocation [concurrent]"),
+            timestamp_writes: None,
+        });
+        let pass_span = diagnostics.pass_span(&mut compute_pass, "uniform_allocation");
+        compute_pass.set_pipeline(uniform_allocation_local_scan_pipeline);
+        for (bind_group, local_scan_workgroup_count) in &jobs {
+            compute_pass.set_bind_group(0, *bind_group, &[]);
+            compute_pass.dispatch_workgroups(*local_scan_workgroup_count, 1, 1);
+        }
+        pass_span.end(&mut compute_pass);
+    }
+
+    // Steps 2 and 3 only for batch sets of more than 256 draws.
+    if jobs.iter().any(|(_, n)| *n > 1) {
+        {
+            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("uniform allocation global scan [concurrent]"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(uniform_allocation_global_scan_pipeline);
+            for (bind_group, _) in jobs.iter().filter(|(_, n)| *n > 1) {
+                compute_pass.set_bind_group(0, *bind_group, &[]);
+                compute_pass.dispatch_workgroups(1, 1, 1);
+            }
+        }
+        {
+            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("uniform allocation fan [concurrent]"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(uniform_allocation_fan_pipeline);
+            for (bind_group, local_scan_workgroup_count) in jobs.iter().filter(|(_, n)| *n > 1) {
+                compute_pass.set_bind_group(0, *bind_group, &[]);
+                compute_pass.dispatch_workgroups(*local_scan_workgroup_count - 1, 1, 1);
+            }
+        }
+    }
 }
 
 /// A rendering system that invokes a compute shader for each batch set in order
@@ -730,7 +746,9 @@ pub fn unpack_bins(
 
     let command_encoder = render_context.command_encoder();
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("bin unpacking"),
+        // NVForever: each batch set writes its own range of the work items
+        // (unpack_bins.wesl `base_output_work_item_index`): concurrent dispatch.
+        label: Some("bin unpacking [concurrent]"),
         timestamp_writes: None,
     });
 

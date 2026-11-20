@@ -1708,6 +1708,14 @@ fn main() -> AppExit {
                     ..ImageSamplerDescriptor::linear()
                 },
             })
+            // `NVF_GPU_PREPROCESS=0`: build the mesh instance buffers on the CPU instead of
+            // Bevy's GPU path, whose "uniform allocation" and "bin unpacking" compute passes
+            // dispatch three small serial jobs per batch set per view: ~7 ms of GPU a frame at
+            // the native Strip (Metal trace, 2026-11-20), where the CPU has time to spare.
+            .set(bevy::pbr::PbrPlugin {
+                use_gpu_instance_buffer_builder: !std::env::var("NVF_GPU_PREPROCESS").is_ok_and(|v| v == "0"),
+                ..default()
+            })
             // Sound goes through nvf_play::audio_out, which follows the output device.
             .disable::<bevy::audio::AudioPlugin>()
             // Parts of Bevy the game never uses: sprites and 2D text (their layout,
