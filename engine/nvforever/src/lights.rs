@@ -205,6 +205,7 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
     } else {
         patched
     };
+    let patched = lean_lighting(patched);
     let patched = debug_shade_floor(patched);
     let patched = crate::fog::with_source(shader, patched);
     let _ = shaders.insert(&state.handle, patched);
@@ -384,6 +385,54 @@ fn debug_light_no_specular(source: String) -> String {
         .replace(point, "        var light_contrib = vec3(0.0);\n        if !nvf_display { light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true); }")
         .replace(spot, "        var light_contrib = vec3(0.0);\n        if !nvf_display { light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse); }");
     info!("lights: no Bevy light highlight in world views (NVF_DEBUG_LIGHT_NO_SPECULAR; {hits} calls changed)");
+    out
+}
+
+/// Lean lighting (on by default; `NVF_LEAN_LIGHTING=0` restores Bevy's terms). A world view
+/// lights each surface twice: Bevy's physically based routine per lamp, per sun and for the
+/// ambient light (with diffuse set to 0 there, so only its glossy highlight is left) and then
+/// the game's own display-value sum (display_shader.rs), which is the picture. The highlight
+/// half is most of the lighting function's code; the GPU sizes a shader's register use, and
+/// so how many pixels it shades at once, by its largest path, so even skipped code slows every
+/// pixel. This compiles it out: every view takes the display sum (the minigame views too, which
+/// used Bevy's), Bevy's lamp, spot and sun calls give 0, and its ambient light is not added.
+/// Kept: the display sum with every lamp, the sun and its shadows, clouds and terrain on the
+/// sun, the ambient occlusion. Lost: the lamps' and sun's glossy highlights (owner's direction
+/// 2026-11-20: the look need not match; optimise and show screenshots).
+fn lean_lighting(source: String) -> String {
+    if std::env::var("NVF_LEAN_LIGHTING").is_ok_and(|v| v == "0") {
+        return source;
+    }
+    const EDITS: [(&str, &str); 5] = [
+        ("    return view_bindings::lights.ambient_color.a < 0.0;", "    return true;"),
+        (
+            "        let light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true);",
+            "        let light_contrib = vec3<f32>(0.0);",
+        ),
+        (
+            "        let light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse);",
+            "        let light_contrib = vec3<f32>(0.0);",
+        ),
+        (
+            "        var light_contrib = lighting::directional_light(i, &lighting_input, enable_diffuse);",
+            "        var light_contrib = vec3<f32>(0.0);",
+        ),
+        ("    if (enable_ambient) {\n        indirect_light += ambient::", "    if (enable_ambient && !nvf_display) {\n        indirect_light += ambient::"),
+    ];
+    let mut out = source;
+    let mut missing = Vec::new();
+    for (from, to) in EDITS {
+        if out.matches(from).count() == 1 {
+            out = out.replacen(from, to, 1);
+        } else {
+            missing.push(from.trim().lines().next().unwrap_or(from));
+        }
+    }
+    if missing.is_empty() {
+        info!("lights: lean lighting: the game's display sum only, Bevy's highlights compiled out (NVF_LEAN_LIGHTING=0 keeps them)");
+    } else {
+        error!("lights: lean lighting: {} anchor(s) not found, those parts stay: {missing:?}", missing.len());
+    }
     out
 }
 

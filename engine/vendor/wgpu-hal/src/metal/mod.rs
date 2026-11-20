@@ -24,6 +24,7 @@ mod adapter;
 mod command;
 mod conv;
 mod device;
+mod gpu_busy;
 mod library_from_metallib;
 mod surface;
 mod time;
@@ -781,7 +782,15 @@ impl crate::Queue for Queue {
                 }
             };
 
+            // NVForever: GPU busy time per frame (gpu_busy.rs, NVF_METAL_GPU_TIME).
+            let measure = gpu_busy::enabled();
+            if measure && !_surface_textures.is_empty() {
+                gpu_busy::frame();
+            }
             for cmd_buffer in command_buffers {
+                if measure {
+                    gpu_busy::watch(&cmd_buffer.raw);
+                }
                 cmd_buffer.raw.commit();
                 // One command buffer per `end_encoding` call moves from the
                 // "created but not yet submitted" bucket into the submitted
