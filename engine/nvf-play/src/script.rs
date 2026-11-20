@@ -2022,6 +2022,47 @@ fn start_menu_frames(rt: &mut Runtime) {
 
 /// One frame of scripts, then their effects.
 #[allow(clippy::too_many_arguments)]
+/// `NVF_SCRIPT_TIMING=1` (fnv_game::script_timing): every 5 s of real time, the script
+/// tick's heaviest phases, its time per kind of runner and its 15 heaviest scripts (by
+/// plugin and FormID), per frame of the window.
+fn log_script_timing(rt: &Runtime) {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static LAST: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
+    if !fnv_game::script_timing::enabled() {
+        return;
+    }
+    let mut last = LAST.lock().unwrap();
+    let frame = rt.game.frame;
+    let (since, from) = *last.get_or_insert((Instant::now(), frame));
+    if since.elapsed().as_secs_f64() < 5.0 {
+        return;
+    }
+    *last = Some((Instant::now(), frame));
+    let frames = (frame - from).max(1) as f64;
+    let t = fnv_game::script_timing::take();
+    let ms = |s: f64| 1000.0 * s / frames;
+    let mut phases: Vec<_> = t.phases.iter().collect();
+    phases.sort_by(|a, b| b.1.total_cmp(a.1));
+    let phase_line: Vec<String> = phases.iter().take(14).map(|(n, s)| format!("{n} {:.3}", ms(**s))).collect();
+    info!("script timing: {frames:.0} ticks; per tick ms: {}", phase_line.join(", "));
+    let mut kinds: Vec<_> = t.kinds.iter().collect();
+    kinds.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
+    let kind_line: Vec<String> = kinds.iter().map(|(k, (s, n))| format!("{k} {:.3} ms ({:.1} runs)", ms(*s), *n as f64 / frames)).collect();
+    info!("script timing by runner: {}", kind_line.join(", "));
+    let mut scripts: Vec<_> = t.scripts.iter().collect();
+    scripts.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
+    let script_line: Vec<String> = scripts
+        .iter()
+        .take(15)
+        .map(|(id, (s, n))| {
+            let name = rt.game.data.script(**id).map(|u| u.key()).unwrap_or_else(|| format!("{id}"));
+            format!("{name} {:.3} ms ({:.2} runs)", ms(*s), *n as f64 / frames)
+        })
+        .collect();
+    info!("script timing top scripts: {}", script_line.join("; "));
+}
+
 pub(crate) fn run_scripts(
     (time, clock): (crate::pause::AidTime, Option<Res<crate::gameplay_clock::GameplayClock>>),
     play: Res<PlayWorld>,
@@ -2425,12 +2466,13 @@ pub(crate) fn run_scripts(
         // The clock's ticks for this frame: one, or two when a slow frame owes a second.
         for _ in 0..ticks {
             if !rt.game.paused() {
-                crate::script_trigger::update(rt, &play, &phys, player_capsule);
+                fnv_game::script_timing::time("engine: script_trigger::update", || crate::script_trigger::update(rt, &play, &phys, player_capsule));
             }
             rt.game.cfg.frame_seconds = dt;
-            with_ray_caster(&mut phys, &play.0, location.world, || rt.game.tick());
-            apply_pushes(&mut rt.game, &mut phys);
+            fnv_game::script_timing::time("engine: Game::tick (all)", || with_ray_caster(&mut phys, &play.0, location.world, || rt.game.tick()));
+            fnv_game::script_timing::time("engine: apply_pushes", || apply_pushes(&mut rt.game, &mut phys));
         }
+        log_script_timing(rt);
         rt.ticked = true;
         crate::aid::after_tick(rt, aid_from);
         // A script's `Activate player` on an actor: the player talks to it.

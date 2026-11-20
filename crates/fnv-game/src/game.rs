@@ -3884,7 +3884,18 @@ impl<'a> Game<'a> {
             _ => None,
         };
         let before = std::mem::replace(&mut self.other.jip14.item_running, item);
+        // Measuring aid (`crate::script_timing`): each run by script and by its runner.
+        let started = crate::script_timing::enabled().then(std::time::Instant::now);
         let ran = self.run_blocks(key, script, event, subject, ctx, false);
+        if let Some(t) = started {
+            let kind = match key {
+                InstKey::Quest { .. } => "quest",
+                InstKey::Ref { .. } => "reference",
+                InstKey::Item { .. } => "item",
+                _ => "other",
+            };
+            crate::script_timing::script(script, kind, t.elapsed().as_secs_f64());
+        }
         self.other.jip14.item_running = before;
         ran
     }
@@ -4104,37 +4115,37 @@ impl<'a> Game<'a> {
     pub fn tick(&mut self) {
         self.frame += 1;
         self.temp_refs.clear();
-        self.sync_player_level();
+        crate::script_timing::time("sync_player_level", || self.sync_player_level());
         // JIP's SetGameMainLoopCallback functions due this frame (task J6), then xNVSE's
         // delayed calls.
-        self.run_main_loop();
+        crate::script_timing::time("run_main_loop", || self.run_main_loop());
         // JIP's key-down and key-up events of the keys the engine says are held.
-        self.jip_keys();
-        self.run_delayed();
+        crate::script_timing::time("jip_keys", || self.jip_keys());
+        crate::script_timing::time("run_delayed", || self.run_delayed());
         // CacheUI's loops, tile scripts and typewriters; vheyes-nvse's moon fade, deferred
         // 3D refreshes and queued console command; kNVSE's SetAnimCurrentTime calls.
-        self.small_tick();
-        self.vheyes_tick();
-        self.knvse_tick();
-        self.advance_first_person_menu_clock();
+        crate::script_timing::time("small_tick", || self.small_tick());
+        crate::script_timing::time("vheyes_tick", || self.vheyes_tick());
+        crate::script_timing::time("knvse_tick", || self.knvse_tick());
+        crate::script_timing::time("advance_first_person_menu_clock", || self.advance_first_person_menu_clock());
         // kNVSE's AnimGroupOverride folders: which hold for each actor.
-        self.anim_folders_tick();
+        crate::script_timing::time("anim_folders_tick", || self.anim_folders_tick());
         // ppNVSE's CallLoop functions due (`crate::nvse_pp`).
-        self.run_pp_loops();
-        self.run_box_callback();
-        self.track_velocity();
-        self.run_due_snippets();
-        self.itr_tick();
+        crate::script_timing::time("run_pp_loops", || self.run_pp_loops());
+        crate::script_timing::time("run_box_callback", || self.run_box_callback());
+        crate::script_timing::time("track_velocity", || self.track_velocity());
+        crate::script_timing::time("run_due_snippets", || self.run_due_snippets());
+        crate::script_timing::time("itr_tick", || self.itr_tick());
         let (dt, frame) = (self.cfg.frame_seconds, self.frame);
         self.gaps.sounds.tick(dt, frame);
-        self.projectiles_tick(dt as f32);
-        self.jg_event(crate::nvse_jip3::JgEvent::RenderUpdate, None);
-        self.hud_tick();
-        self.lu3_tick();
-        self.sup7_tick();
+        crate::script_timing::time("projectiles_tick", || self.projectiles_tick(dt as f32));
+        crate::script_timing::time("jg_event", || self.jg_event(crate::nvse_jip3::JgEvent::RenderUpdate, None));
+        crate::script_timing::time("hud_tick", || self.hud_tick());
+        crate::script_timing::time("lu3_tick", || self.lu3_tick());
+        crate::script_timing::time("sup7_tick", || self.sup7_tick());
         // SUP's HUD bars: their visibility conditions and fades (`crate::ui_hudbar`).
         crate::ui_hudbar::tick(self);
-        self.expire_aux_timers();
+        crate::script_timing::time("expire_aux_timers", || self.expire_aux_timers());
         self.input.next_frame();
         self.turned.clear();
         // SetAllVisible and SetNoAvoidance last one frame: the scripts of this frame
@@ -4154,7 +4165,7 @@ impl<'a> Game<'a> {
             self.run_challenge_rewards();
         }
         // In menu mode too: a note taken in the container menu files at once.
-        self.file_carried_notes();
+        crate::script_timing::time("file_carried_notes", || self.file_carried_notes());
         if self.loading {
             self.side_blocks(menus::LOADING);
             return;
@@ -4181,7 +4192,7 @@ impl<'a> Game<'a> {
         }
         // `MoveToMarkerWithFade` moves whose fade out has ended.
         crate::functions::refs::finish_fade_moves(self);
-        self.jip13_tick();
+        crate::script_timing::time("jip13_tick", || self.jip13_tick());
         // Without an engine taking them (a headless run) the lists are kept short.
         if self.script_looks.disabled_after_fade.len() > 256 {
             self.script_looks.disabled_after_fade.drain(..128);
@@ -4200,11 +4211,11 @@ impl<'a> Game<'a> {
         for (r, ev, by) in std::mem::take(&mut self.queued_ref_events) {
             self.ref_event(r, ev, Some(Value::Ref(r.0)), by);
         }
-        self.combat_blocks();
+        crate::script_timing::time("combat_blocks", || self.combat_blocks());
         // Activate children whose delay passed (`crate::traps`).
-        self.activate_due_children();
+        crate::script_timing::time("activate_due_children", || self.activate_due_children());
         // Fighting NPCs take up the weapon their combat style allows (`crate::style_weapon`).
-        self.arm_by_style();
+        crate::script_timing::time("arm_by_style", || self.arm_by_style());
         let ev = if in_menu { event::MENU_MODE } else { event::GAME_MODE };
         let subject = self.open_menu_code().map(|m| Value::Num(m as f64));
         let data = self.data;
@@ -4242,9 +4253,9 @@ impl<'a> Game<'a> {
             }
             self.run_event(key, script, ev, subject, RunCtx { quest: Some(q), ..Default::default() });
         }
-        let active = if scripts { self.active_refs() } else { Vec::new() };
+        let active = if scripts { crate::script_timing::time("active_refs", || self.active_refs()) } else { Vec::new() };
         // Doors opened or closed since the last frame, by anyone (OnOpen, OnClose).
-        self.watch_doors(&active);
+        crate::script_timing::time("watch_doors", || self.watch_doors(&active));
         for r in active {
             if held(self) {
                 break;
@@ -4283,7 +4294,7 @@ impl<'a> Game<'a> {
         }
         // Abilities and worn enchantments follow the loaded actors and what they wear,
         // menus included (an item equipped in the Pip-Boy).
-        self.sync_loaded_actor_effects();
+        crate::script_timing::time("sync_loaded_actor_effects", || self.sync_loaded_actor_effects());
         if !in_menu {
             self.update_effects(dt);
             self.tick_concussions();

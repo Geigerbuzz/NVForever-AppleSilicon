@@ -37,6 +37,7 @@
 extern crate self as fnv_game;
 
 pub mod abilities;
+pub mod script_timing;
 pub mod activate_choices;
 pub mod actor_values;
 pub mod aggro;
