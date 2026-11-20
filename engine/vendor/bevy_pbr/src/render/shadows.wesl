@@ -50,7 +50,9 @@ fn fetch_point_shadow(
     // If soft shadows are enabled, use the PCSS path. Cubemaps assume a
     // left-handed coordinate space, so we have to flip the z-axis when
     // sampling.
-    if ((*light).soft_shadow_size > 0.0) {
+    // NVForever: no light has soft shadows (the game never sets `soft_shadow_size`), so the
+    // PCSS path is compiled only with NVF_PCSS, which nothing sets (2026-11-20).
+    @if(NVF_PCSS) if ((*light).soft_shadow_size > 0.0) {
         return sample_shadow_cubemap_pcss(
             frag_ls * flip_z,
             distance_to_light,
@@ -111,7 +113,9 @@ fn fetch_spot_shadow(
 
     // If soft shadows are enabled, use the PCSS path.
     let array_index = i32(light_id) + view_bindings::lights.spot_light_shadowmap_offset;
-    if ((*light).soft_shadow_size > 0.0) {
+    // NVForever: no light has soft shadows (the game never sets `soft_shadow_size`), so the
+    // PCSS path is compiled only with NVF_PCSS, which nothing sets (2026-11-20).
+    @if(NVF_PCSS) if ((*light).soft_shadow_size > 0.0) {
         return sample_shadow_map_pcss(
             shadow_uv,
             depth,
@@ -199,7 +203,9 @@ fn sample_directional_cascade(
     let texel_size = (*cascade).texel_size;
 
     // If soft shadows are enabled, use the PCSS path.
-    if ((*light).soft_shadow_size > 0.0) {
+    // NVForever: no light has soft shadows (the game never sets `soft_shadow_size`), so the
+    // PCSS path is compiled only with NVF_PCSS, which nothing sets (2026-11-20).
+    @if(NVF_PCSS) if ((*light).soft_shadow_size > 0.0) {
         return sample_shadow_map_pcss(
             light_local.xy,
             light_local.z,

@@ -878,35 +878,42 @@ fn apply_fog(
     // fog shape that looks a bit fake
     let distance = length(view_to_world);
 
-    // Calculate view_z for shadow cascade selection
-    let view_pos = view_transformations::position_world_to_view(fragment_world_position);
-    let view_z = view_pos.z;
-
-    // Approximate surface normal using view direction for shadow sampling
-    let view_direction_normal = normalize(-view_to_world);
-    let fragment_world_position_vec4 = vec4<f32>(fragment_world_position, 1.0);
-
     var scattering = vec3<f32>(0.0);
-    if fog_params.directional_light_color.a > 0.0 {
-        let view_to_world_normalized = view_to_world / distance;
-        let n_directional_lights = view_bindings::lights.n_directional_lights;
-        for (var i: u32 = 0u; i < n_directional_lights; i = i + 1u) {
-            let light = view_bindings::lights.directional_lights[i];
-            let scattering_contribution = pow(
-                max(
-                    dot(view_to_world_normalized, light.direction_to_light),
-                    0.0
-                ),
-                fog_params.directional_light_exponent
-            ) * light.color.rgb * view_bindings::view.exposure;
+    // NVForever: the directional inscattering (and its shadow-map fetch) only when built
+    // with NVF_FOG_INSCATTER, which nothing sets: the game's fog keeps the directional
+    // colour's alpha at 0 (nvforever haze.rs, fog.rs), so this loop never ran, yet it sat
+    // in every lit pixel's shader with a full copy of the shadow fetch (2026-11-20).
+    @if(NVF_FOG_INSCATTER) {
+        // Calculate view_z for shadow cascade selection
+        let view_pos = view_transformations::position_world_to_view(fragment_world_position);
+        let view_z = view_pos.z;
 
-            // Sample shadow map to attenuate inscattering in shadowed areas
-            var shadow: f32 = 1.0;
-            if ((light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-                shadow = shadows::fetch_directional_shadow(i, fragment_world_position_vec4, view_direction_normal, view_z, frag_coord_xy);
+        // Approximate surface normal using view direction for shadow sampling
+        let view_direction_normal = normalize(-view_to_world);
+        let fragment_world_position_vec4 = vec4<f32>(fragment_world_position, 1.0);
+
+        if fog_params.directional_light_color.a > 0.0 {
+            let view_to_world_normalized = view_to_world / distance;
+            let n_directional_lights = view_bindings::lights.n_directional_lights;
+            for (var i: u32 = 0u; i < n_directional_lights; i = i + 1u) {
+                let light = view_bindings::lights.directional_lights[i];
+                let scattering_contribution = pow(
+                    max(
+                        dot(view_to_world_normalized, light.direction_to_light),
+                        0.0
+                    ),
+                    fog_params.directional_light_exponent
+                ) * light.color.rgb * view_bindings::view.exposure;
+
+                // Sample shadow map to attenuate inscattering in shadowed areas
+                var shadow: f32 = 1.0;
+                if ((light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                    shadow = shadows::fetch_directional_shadow(i, fragment_world_position_vec4, view_direction_normal, view_z, frag_coord_xy);
+                }
+                scattering += scattering_contribution * shadow;
             }
-            scattering += scattering_contribution * shadow;
         }
+
     }
 
     if fog_params.mode == mesh_view_types::FOG_MODE_LINEAR {

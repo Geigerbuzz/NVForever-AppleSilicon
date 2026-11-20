@@ -679,6 +679,15 @@ pub struct NifSurfaceKey {
     /// the surface the depth prepass holds and take the ambient occlusion
     /// ([`ambient_occlusion_opt_in`]).
     pub terrain_layer: bool,
+    /// Per-pixel work only some shapes need, compiled in only for them (2026-11-20: a plain
+    /// wall paid for all of it on every pixel; the shader's size also cut how many pixels
+    /// the GPU shades at once). `holes`: a holes texture (NIF_HOLES). `see_through`: a
+    /// view-angle falloff, a soft fade or an alpha cut (NIF_SEE_THROUGH); without them the
+    /// falloff is exactly 1 and nothing is cut. `display_vc`: vertex colours held as
+    /// display values (`emissive_rule` z, NIF_DISPLAY_VC).
+    pub holes: bool,
+    pub see_through: bool,
+    pub display_vc: bool,
 }
 
 impl From<&NifSurface> for NifSurfaceKey {
@@ -695,6 +704,9 @@ impl From<&NifSurface> for NifSurfaceKey {
             pipboy_screen: surface.pipboy_screen,
             anti_tiling: surface.anti_tiling && crate::terrain_sampling::repeat_valid(surface.terrain_repeat),
             terrain_layer: crate::terrain_sampling::repeat_valid(surface.terrain_repeat),
+            holes: surface.holes_texture.is_some() && surface.holes.x >= 0.0 && surface.holes.x < 255.0,
+            see_through: surface.falloff != Falloff::NONE.params || surface.alpha_cut > 0.0 || surface.soft.x > 0.0,
+            display_vc: surface.emissive_rule.z > 0.5,
         }
     }
 }
@@ -715,6 +727,14 @@ impl MaterialExtension for NifSurface {
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         nif_prepass(descriptor, key.mesh_key);
+        // The per-pixel work only some shapes need ([`NifSurfaceKey::holes`] and the rest).
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            for (on, def) in [(key.bind_group_data.holes, "NIF_HOLES"), (key.bind_group_data.see_through, "NIF_SEE_THROUGH"), (key.bind_group_data.display_vc, "NIF_DISPLAY_VC")] {
+                if on {
+                    fragment.shader_defs.push(def.into());
+                }
+            }
+        }
         // Measuring aid: `NVF_DEBUG_MAT_STOP=1|2|3` ends the main pass's fragment shader early
         // (nif_material.wesl NVF_STOP_n: after the surface is read, before the lighting,
         // before fog), to tell what each part of it costs. Wrong pictures; never for play.
@@ -1529,10 +1549,11 @@ mod tests {
         let lod = decal_bias(DepthBiasState { constant: -50, ..default() });
         assert_eq!(lod.constant, DECAL_BIAS - 50);
         assert_eq!(raster_bias(decal.constant), decal.constant);
-        // Only the switches in `NifSurfaceKey` select the pipeline; the falloff and the
-        // alpha cut are uniforms.
+        // The switches in `NifSurfaceKey` select the pipeline. The falloff's and the alpha
+        // cut's values are uniforms; whether a shape has any (or a soft fade) selects the
+        // pipeline that carries that code at all (`see_through`, 2026-11-20).
         let mut surface = NifSurface::default();
-        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: false, refract: false, hard_edges: false, shade_light: false, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false });
+        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: false, refract: false, hard_edges: false, shade_light: false, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, holes: false, see_through: false, display_vc: false });
         assert_eq!(surface.alpha_cut, 0.0);
         assert_eq!(surface.emissive_rule, Vec4::ZERO);
         assert_eq!(NifSurfaceUniform::from(&surface).emissive_rule, Vec4::ZERO);
@@ -1540,21 +1561,51 @@ mod tests {
         surface.alpha_cut = 0.5;
         surface.emissive_rule = Vec4::new(1.0, 1.5, 0.0, 0.0);
         assert_eq!(NifSurfaceUniform::from(&surface).emissive_rule, surface.emissive_rule);
-        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey::from(&NifSurface::default()));
+        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { see_through: true, ..NifSurfaceKey::from(&NifSurface::default()) });
+        // Other values of them keep the same pipeline.
+        let mut other = surface.clone();
+        other.falloff = Vec4::new(0.8, 0.1, 1.0, 0.2);
+        other.alpha_cut = 0.25;
+        assert_eq!(NifSurfaceKey::from(&other), NifSurfaceKey::from(&surface));
         surface.decal = true;
-        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: false, hard_edges: false, shade_light: false, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false });
+        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: false, hard_edges: false, shade_light: false, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, holes: false, see_through: true, display_vc: false });
         surface.hard_edges = true;
-        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: false, hard_edges: true, shade_light: false, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false });
+        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: false, hard_edges: true, shade_light: false, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, holes: false, see_through: true, display_vc: false });
         surface.shade_light = true;
-        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: false, hard_edges: true, shade_light: true, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false });
+        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: false, hard_edges: true, shade_light: true, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, holes: false, see_through: true, display_vc: false });
         // The refraction strength is a uniform; whether the shape refracts is the pipeline's.
         surface.refraction = 0.1;
-        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: false, hard_edges: true, shade_light: true, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false });
+        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: false, hard_edges: true, shade_light: true, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, holes: false, see_through: true, display_vc: false });
         surface.refract = true;
-        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: true, hard_edges: true, shade_light: true, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false });
+        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: true, hard_edges: true, shade_light: true, facegen: false, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, holes: false, see_through: true, display_vc: false });
         // A FaceGen offset selects the tinting shader.
         surface.facegen_offset = Some(Handle::default());
-        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: true, hard_edges: true, shade_light: true, facegen: true, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false });
+        assert_eq!(NifSurfaceKey::from(&surface), NifSurfaceKey { decal: true, refract: true, hard_edges: true, shade_light: true, facegen: true, depth_write: false, first_person: false, add_linear: false, pipboy_screen: false, anti_tiling: false, terrain_layer: false, holes: false, see_through: true, display_vc: false });
+    }
+
+    /// A plain opaque shape compiles none of the per-pixel extras; each extra is switched on
+    /// only by what needs it (NifSurfaceKey `holes`, `see_through`, `display_vc`).
+    #[test]
+    fn plain_shapes_get_the_lean_pipeline() {
+        let plain = NifSurface::default();
+        let k = NifSurfaceKey::from(&plain);
+        assert!(!k.holes && !k.see_through && !k.display_vc, "{k:?}");
+        let mut soft = plain.clone();
+        soft.soft.x = 40.0;
+        assert!(NifSurfaceKey::from(&soft).see_through);
+        let mut cut = plain.clone();
+        cut.alpha_cut = 0.1;
+        assert!(NifSurfaceKey::from(&cut).see_through);
+        let mut vc = plain.clone();
+        vc.emissive_rule.z = 1.0;
+        assert!(NifSurfaceKey::from(&vc).display_vc);
+        let mut holes = plain.clone();
+        holes.holes_texture = Some(Handle::default());
+        holes.holes.x = 128.0;
+        assert!(NifSurfaceKey::from(&holes).holes);
+        // A holes texture with the test off (x out of 0..255) draws no holes.
+        holes.holes.x = -1.0;
+        assert!(!NifSurfaceKey::from(&holes).holes);
     }
 
     /// First-person depth (module notes): the squeeze keeps the near plane at 1, puts the

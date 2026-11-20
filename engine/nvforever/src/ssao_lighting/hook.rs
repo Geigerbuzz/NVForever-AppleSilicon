@@ -82,16 +82,21 @@ pub const DEBUG_FUNCTION: &str = "\nfn main_pass_post_lighting_processing(";
 /// exactly what `nvf_ambient_visibility` gave the fragment: the same position, the same
 /// distance (`view_z` as `apply_pbr_lighting` forms it).
 pub const DEBUG_TEXT: &str = "    // NVForever ambient occlusion (nvforever ssao_lighting.rs): the debug view draws the
-    // factor this fragment's ambient light took, after everything else.
+    // factor this fragment's ambient light took, after everything else. Compiled only when
+    // the view was asked for at start (NVF_AO_DEBUG_VIEW, bevy_pbr mesh.rs): otherwise this
+    // second copy of the occlusion lookup sat in every pixel's shader (2026-11-20).
     @if(NVF_AMBIENT_OCCLUSION)
-    if nvf_ao_debug() {
-        let nvf_view_z = dot(vec4<f32>(
-            view_bindings::view.view_from_world[0].z,
-            view_bindings::view.view_from_world[1].z,
-            view_bindings::view.view_from_world[2].z,
-            view_bindings::view.view_from_world[3].z
-        ), pbr_input.world_position);
-        output_color = vec4<f32>(vec3<f32>(nvf_ambient_visibility(pbr_input.frag_coord.xy, -nvf_view_z)), output_color.a);
+    {
+        @if(NVF_AO_DEBUG_VIEW)
+        if nvf_ao_debug() {
+            let nvf_view_z = dot(vec4<f32>(
+                view_bindings::view.view_from_world[0].z,
+                view_bindings::view.view_from_world[1].z,
+                view_bindings::view.view_from_world[2].z,
+                view_bindings::view.view_from_world[3].z
+            ), pbr_input.world_position);
+            output_color = vec4<f32>(vec3<f32>(nvf_ambient_visibility(pbr_input.frag_coord.xy, -nvf_view_z)), output_color.a);
+        }
     }
 ";
 

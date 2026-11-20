@@ -549,6 +549,10 @@ impl From<&NifSurfaceBlendColour> for NifSurfaceBlendKey {
             // An object blended into the landscape, not a landscape layer: bevy_pbr's rule
             // decides its ambient occlusion.
             terrain_layer: false,
+            // Blend clones are made only without holes (`blend_clone`'s assertion).
+            holes: false,
+            see_through: s.falloff != crate::nif_material::Falloff::NONE.params || s.alpha_cut > 0.0 || s.soft.x > 0.0,
+            display_vc: s.emissive_rule.z > 0.5,
         }, s.mesh_terrain_layout)
     }
 }

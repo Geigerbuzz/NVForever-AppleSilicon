@@ -3778,6 +3778,13 @@ impl SpecializedMeshPipeline for MeshPipeline {
         // occlusion there); the layout keeps bindings 43-44 either way.
         if key.contains(MeshPipelineKey::NVF_AMBIENT_OCCLUSION) && depth_write_enabled {
             shader_defs.push("NVF_AMBIENT_OCCLUSION".into());
+            // NVForever: its debug view only when asked for at start
+            // (`NVF_PLAY_DEBUG_AO=view…`, nvforever ssao.rs), so normal play does not
+            // carry a second copy of the occlusion lookup in every pixel.
+            static AO_DEBUG_VIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *AO_DEBUG_VIEW.get_or_init(|| std::env::var("NVF_PLAY_DEBUG_AO").is_ok_and(|v| v.trim().to_ascii_lowercase().starts_with("view"))) {
+                shader_defs.push("NVF_AO_DEBUG_VIEW".into());
+            }
         }
 
         if self.binding_arrays_are_usable {

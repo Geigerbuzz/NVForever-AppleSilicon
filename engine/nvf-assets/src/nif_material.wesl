@@ -528,7 +528,8 @@ fn nif_fragment(
     @if(PIPBOY_SCREEN && VERTEX_UVS_A) let screen_dy = dpdy(screen_uv);
     // Holes (nif_material.rs "Holes"): 1 in the edge band, 0 elsewhere.
     var holes_band = 0.0;
-    @if(VERTEX_UVS_A) if surface.holes.x >= 0.0 && surface.holes.x < 255.0 {
+    // Only shapes with a holes texture compile this (NIF_HOLES, nif_material.rs NifSurfaceKey).
+    @if(NIF_HOLES && VERTEX_UVS_A) if surface.holes.x >= 0.0 && surface.holes.x < 255.0 {
         let h = holes_alpha(in.instance_index, in.uv) * 255.0;
         let cut_out = (surface.holes.z > 0.5);
         if select((h >= surface.holes.x), (h < surface.holes.x), cut_out) {
@@ -542,7 +543,7 @@ fn nif_fragment(
     // values", #2435). Made linear at the vertices, the blend kept a colour falling to
     // black bright almost to the black edge: a glow card's soft wash became a board.
     var vin = in;
-    @if(VERTEX_COLORS) if surface.emissive_rule.z > 0.5 {
+    @if(VERTEX_COLORS && NIF_DISPLAY_VC) if surface.emissive_rule.z > 0.5 {
         vin.color = vec4(display_to_linear(in.color.rgb), in.color.a);
     }
     @if(!TERRAIN_ANTI_TILING) var pbr_input = pbr_input_from_standard_material(vin, is_front);
@@ -595,12 +596,19 @@ fn nif_fragment(
     @if(REFRACT) return refracted;
     // |N·V|: the normal is already flipped towards the viewer on back faces of double-sided
     // shapes; abs() also covers single-sided ones seen edge-on.
-    let cos_angle = abs(dot(normalize(pbr_input.world_normal), pbr_input.V));
-    @if(PREPASS_PIPELINE) let falloff = falloff_opacity(cos_angle, surface.falloff);
-    @if(!PREPASS_PIPELINE) let falloff = falloff_opacity(cos_angle, surface.falloff) * soft_fade(in.position, pbr_input.world_position.xyz, surface.soft.x);
-    pbr_input.material.base_color.a *= falloff;
-    if pbr_input.material.base_color.a < surface.alpha_cut {
-        discard;
+    // Only shapes with a view-angle falloff, a soft fade or an alpha cut compile this
+    // (NIF_SEE_THROUGH, nif_material.rs NifSurfaceKey): on every other shape the falloff
+    // is exactly 1 (Falloff::NONE), the fade 1 and the cut 0, so it changed nothing, yet
+    // every pixel paid for it (a prepass depth read, derivatives, a discard). Exact.
+    var falloff = 1.0;
+    @if(NIF_SEE_THROUGH) {
+        let cos_angle = abs(dot(normalize(pbr_input.world_normal), pbr_input.V));
+        @if(PREPASS_PIPELINE) falloff = falloff_opacity(cos_angle, surface.falloff);
+        @if(!PREPASS_PIPELINE) falloff = falloff_opacity(cos_angle, surface.falloff) * soft_fade(in.position, pbr_input.world_position.xyz, surface.soft.x);
+        pbr_input.material.base_color.a *= falloff;
+        if pbr_input.material.base_color.a < surface.alpha_cut {
+            discard;
+        }
     }
     // Alpha-tested shape in a multisampled view (nif_material.rs `soft_edges`): the share
     // of the pixel's samples the shape covers, 1 at the cutoff and above, falling to 0
@@ -720,7 +728,7 @@ fn nif_fragment(
             }
         }
     }
-    @if(!PREPASS_PIPELINE) out.color = vec4(mix(out.color.rgb, surface.holes_edge.rgb, holes_band), out.color.a);
+    @if(!PREPASS_PIPELINE && NIF_HOLES) out.color = vec4(mix(out.color.rgb, surface.holes_edge.rgb, holes_band), out.color.a);
     // The colour is a factor, not light: no fog and no tonemapping. Bevy's multiply blend
     // is destination × colour + destination × (1 − alpha), so the colour is premultiplied
     // as bevy_pbr::pbr_functions::premultiply_alpha does.
