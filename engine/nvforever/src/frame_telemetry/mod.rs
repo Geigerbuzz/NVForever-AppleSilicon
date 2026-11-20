@@ -84,7 +84,10 @@ pub fn parse_aids(seconds: Option<&str>, gpu: Option<&str>, run_id: Option<&str>
         duration: if seconds == 0.0 {
             Duration::ZERO
         } else {
-            Duration::from_secs_f64(seconds.min(60.0)).max(Duration::from_nanos(1))
+            // Up to 10 minutes (the frame and byte limits still bound the file): a capture
+            // runs from launch, and with the Strip's overhauls the loading alone took ~35 s of
+            // the old 60 s cap, leaving no settled frames to measure (2026-11-20).
+            Duration::from_secs_f64(seconds.min(600.0)).max(Duration::from_nanos(1))
         },
         gpu,
         run_id: parse_id(run_id, "NVF_PLAY_TEST_FRAME_TELEMETRY_RUN_ID")?,

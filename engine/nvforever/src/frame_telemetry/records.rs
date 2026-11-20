@@ -79,8 +79,9 @@ impl Header {
         if capture_id.is_empty() || parse_id(Some(capture_id), "capture_id").is_err() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid capture_id"));
         }
-        if config.duration.is_zero() || config.duration.as_secs_f64() > 60.0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "capture duration must be in (0, 60] seconds"));
+        // Up to 10 minutes, as `parse_aids` allows (a capture runs from launch; see there).
+        if config.duration.is_zero() || config.duration.as_secs_f64() > 600.0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "capture duration must be in (0, 600] seconds"));
         }
         parse_id(config.run_id.as_deref(), "run_id").map_err(io::Error::other)?;
         parse_id(config.scenario_id.as_deref(), "scenario_id").map_err(io::Error::other)?;
