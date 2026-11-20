@@ -11,6 +11,7 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_log::warn;
+use bevy_platform::collections::{HashMap, HashSet};
 use bevy_mesh::Indices;
 use bevy_shape::{Aabb2d, BoundingVolume};
 use glam::Vec4;
@@ -56,6 +57,21 @@ pub struct MeshAllocator {
     /// WebGL 2. On this platform, we must give each vertex array its own
     /// buffer, because we can't adjust the first vertex when we perform a draw.
     general_vertex_slabs_supported: bool,
+
+    /// NVForever: the footprint each allocated mesh was given ([`MeshFootprint`]), so a mesh
+    /// modified with the same footprint keeps its allocation and only has its data
+    /// rewritten in place (upstream's TODO in `free_meshes`). Meshes rewritten every frame
+    /// (particle systems) were freed and reallocated every frame: new slab places, rebinned
+    /// draws and, when a slab grew, new GPU buffers (2026-11-20).
+    footprints: HashMap<AssetId<Mesh>, MeshFootprint>,
+}
+
+/// What a mesh's allocations are made of: equal footprints fit the same allocations.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MeshFootprint {
+    metadata: bool,
+    vertex: (u64, ElementLayout),
+    index: Option<(u64, ElementLayout)>,
 }
 
 /// Tunable parameters that customize the behavior of the allocator.
@@ -240,6 +256,7 @@ impl FromWorld for MeshAllocator {
         Self {
             slab_allocator,
             general_vertex_slabs_supported,
+            footprints: HashMap::default(),
         }
     }
 }
@@ -257,8 +274,11 @@ pub fn allocate_and_free_meshes(
     // Clear the list of meshes displaced by last frame's slab growth.
     mesh_allocator.clear_displaced_keys();
 
+    // NVForever: modified meshes whose footprint did not change keep their allocations.
+    let reuse = mesh_allocator.reusable_meshes(&extracted_meshes, &mut mesh_vertex_buffer_layouts);
+
     // Process removed or modified meshes.
-    mesh_allocator.free_meshes(&extracted_meshes);
+    mesh_allocator.free_meshes(&extracted_meshes, &reuse);
 
     // Process newly-added or modified meshes.
     mesh_allocator.allocate_meshes(
@@ -267,6 +287,7 @@ pub fn allocate_and_free_meshes(
         &mut mesh_vertex_buffer_layouts,
         &render_device,
         &render_queue,
+        &reuse,
     );
 }
 
@@ -424,6 +445,7 @@ impl MeshAllocator {
         mesh_vertex_buffer_layouts: &mut MeshVertexBufferLayouts,
         render_device: &RenderDevice,
         render_queue: &RenderQueue,
+        reuse: &HashSet<AssetId<Mesh>>,
     ) {
         let mut allocation_stage = self.slab_allocator.stage_allocation();
 
@@ -432,6 +454,10 @@ impl MeshAllocator {
             let vertex_buffer_size = mesh.get_vertex_buffer_size() as u64;
             if vertex_buffer_size == 0 {
                 warn!("Mesh {:?} contains no vertices.", mesh_id);
+                continue;
+            }
+            // NVForever: it keeps the allocations it has; its data is copied in below.
+            if reuse.contains(mesh_id) {
                 continue;
             }
 
@@ -496,6 +522,24 @@ impl MeshAllocator {
 
         // Perform growth.
         allocation_stage.commit(render_device, render_queue);
+
+        // NVForever: the footprints of what is allocated now.
+        for id in &extracted_meshes.removed {
+            self.footprints.remove(id);
+        }
+        for (mesh_id, mesh) in &extracted_meshes.extracted {
+            if reuse.contains(mesh_id) {
+                continue;
+            }
+            match Self::footprint(mesh_vertex_buffer_layouts, mesh) {
+                Some(f) => {
+                    self.footprints.insert(*mesh_id, f);
+                }
+                None => {
+                    self.footprints.remove(mesh_id);
+                }
+            }
+        }
 
         // Copy new mesh data in.
         for (mesh_id, mesh) in &extracted_meshes.extracted {
@@ -624,9 +668,47 @@ impl MeshAllocator {
         );
     }
 
+    /// NVForever: the footprint a mesh's allocations take; `None` for meshes never reused
+    /// in place (no vertices, or morph targets).
+    fn footprint(layouts: &mut MeshVertexBufferLayouts, mesh: &Mesh) -> Option<MeshFootprint> {
+        let vertex_buffer_size = mesh.get_vertex_buffer_size() as u64;
+        if vertex_buffer_size == 0 {
+            return None;
+        }
+        #[cfg(feature = "morph")]
+        if mesh.get_morph_targets().is_some() {
+            return None;
+        }
+        let index = match (mesh.get_index_buffer_bytes(), ElementLayout::index(mesh)) {
+            (Some(bytes), Some(layout)) => Some((bytes.len() as u64, layout)),
+            _ => None,
+        };
+        Some(MeshFootprint {
+            metadata: mesh.final_aabb.is_some() || mesh.final_uv_ranges.iter().any(Option::is_some),
+            vertex: (vertex_buffer_size, ElementLayout::vertex(layouts, mesh)),
+            index,
+        })
+    }
+
+    /// NVForever: the meshes modified this frame (not removed, not new) whose footprint is
+    /// the one they are allocated with: they keep their allocations.
+    fn reusable_meshes(&self, extracted_meshes: &ExtractedAssets<RenderMesh>, layouts: &mut MeshVertexBufferLayouts) -> HashSet<AssetId<Mesh>> {
+        let mut reuse = HashSet::default();
+        for (mesh_id, mesh) in &extracted_meshes.extracted {
+            if !extracted_meshes.modified.contains(mesh_id) || extracted_meshes.removed.contains(mesh_id) {
+                continue;
+            }
+            let Some(old) = self.footprints.get(mesh_id) else { continue };
+            if Self::footprint(layouts, mesh).as_ref() == Some(old) {
+                reuse.insert(*mesh_id);
+            }
+        }
+        reuse
+    }
+
     /// Frees allocations for meshes that were removed, modified, or re-extracted
-    /// this frame.
-    fn free_meshes(&mut self, extracted_meshes: &ExtractedAssets<RenderMesh>) {
+    /// this frame (NVForever: except those in `reuse`, which keep theirs).
+    fn free_meshes(&mut self, extracted_meshes: &ExtractedAssets<RenderMesh>, reuse: &HashSet<AssetId<Mesh>>) {
         let mut deallocation_stage = self.slab_allocator.stage_deallocation();
 
         // TODO: Consider explicitly reusing allocations for changed meshes of
@@ -644,6 +726,9 @@ impl MeshAllocator {
             .chain(extracted_meshes.added.iter());
 
         for mesh_id in meshes_to_free {
+            if reuse.contains(mesh_id) {
+                continue;
+            }
             deallocation_stage.free(&MeshAllocationKey::new(*mesh_id, ElementClass::Metadata));
             deallocation_stage.free(&MeshAllocationKey::new(*mesh_id, ElementClass::Vertex));
             deallocation_stage.free(&MeshAllocationKey::new(*mesh_id, ElementClass::Index));
@@ -868,12 +953,13 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            &HashSet::default(),
         );
         assert!(mesh_allocator.mesh_vertex_slice(&mesh_id).is_some());
 
         // Being present in `added` alone must be enough to release the previous
         // allocation.
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
 
         assert!(
             mesh_allocator.key_to_slab.is_empty(),
@@ -901,12 +987,13 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            &HashSet::default(),
         );
         assert!(mesh_allocator.mesh_vertex_slice(&mesh_id).is_some());
 
         let mut extracted_meshes = ExtractedAssets::<RenderMesh>::default();
         extracted_meshes.modified.insert(mesh_id);
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
 
         assert!(
             mesh_allocator.key_to_slab.is_empty(),
@@ -932,6 +1019,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            &HashSet::default(),
         );
 
         assert!(has_allocation(
@@ -956,7 +1044,7 @@ mod tests {
             ElementClass::MorphTarget
         ));
 
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
 
         assert!(
             mesh_allocator.key_to_slab.is_empty(),
@@ -981,6 +1069,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            &HashSet::default(),
         );
         assert!(has_allocation(
             &mesh_allocator,
@@ -990,13 +1079,14 @@ mod tests {
 
         // The same ID comes back as a bare vertex-only mesh.
         let extracted_meshes = extracted_mesh(mesh_id, test_mesh());
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
         mesh_allocator.allocate_meshes(
             &settings,
             &extracted_meshes,
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            &HashSet::default(),
         );
 
         assert!(has_allocation(
@@ -1035,6 +1125,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            &HashSet::default(),
         );
         assert_eq!(mesh_allocator.slab_count(), 1);
         let original_slab =
@@ -1043,13 +1134,14 @@ mod tests {
         // Adding a normal attribute widens the vertex, which needs a slab with a
         // different element layout.
         let extracted_meshes = extracted_mesh(mesh_id, wider_vertex_mesh());
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
         mesh_allocator.allocate_meshes(
             &settings,
             &extracted_meshes,
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            &HashSet::default(),
         );
 
         let new_slab =
@@ -1105,13 +1197,14 @@ mod tests {
         let mut baseline = None;
         for _ in 0..rounds {
             let extracted_meshes = build(mesh_id, build_mesh());
-            mesh_allocator.free_meshes(&extracted_meshes);
+            mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
             mesh_allocator.allocate_meshes(
                 &settings,
                 &extracted_meshes,
                 &mut mesh_vertex_buffer_layouts,
                 &render_device,
                 &render_queue,
+            &HashSet::default(),
             );
 
             let size = mesh_allocator.slabs_size();
@@ -1188,5 +1281,42 @@ mod tests {
             },
             32,
         );
+    }
+
+    /// NVForever: a mesh modified with the same footprint keeps its allocation (the same
+    /// slab and range), and one whose size changed is reallocated.
+    #[test]
+    fn modified_meshes_of_the_same_footprint_keep_their_allocation() {
+        let (render_device, render_queue) = create_dummy_device();
+        let settings = MeshAllocatorSettings::default();
+        let mut layouts = MeshVertexBufferLayouts::default();
+        let mut mesh_allocator = mesh_allocator(true);
+        let mesh_id = mesh_id(1);
+        let added = extracted_mesh(mesh_id, full_mesh());
+        let none = HashSet::default();
+        mesh_allocator.free_meshes(&added, &none);
+        mesh_allocator.allocate_meshes(&settings, &added, &mut layouts, &render_device, &render_queue, &none);
+        let before = mesh_allocator.mesh_vertex_slice(&mesh_id).map(|s| s.range.clone()).expect("allocated");
+
+        // The same footprint: kept.
+        let same = modified_mesh(mesh_id, full_mesh());
+        let reuse = mesh_allocator.reusable_meshes(&same, &mut layouts);
+        assert!(reuse.contains(&mesh_id));
+        mesh_allocator.free_meshes(&same, &reuse);
+        mesh_allocator.allocate_meshes(&settings, &same, &mut layouts, &render_device, &render_queue, &reuse);
+        assert_eq!(mesh_allocator.mesh_vertex_slice(&mesh_id).map(|s| s.range.clone()), Some(before.clone()));
+        assert!(has_allocation(&mesh_allocator, mesh_id, ElementClass::Index));
+
+        // Another footprint: not kept, allocated afresh.
+        let other = modified_mesh(mesh_id, test_mesh());
+        let reuse = mesh_allocator.reusable_meshes(&other, &mut layouts);
+        assert!(!reuse.contains(&mesh_id));
+        mesh_allocator.free_meshes(&other, &reuse);
+        mesh_allocator.allocate_meshes(&settings, &other, &mut layouts, &render_device, &render_queue, &reuse);
+        assert!(mesh_allocator.mesh_vertex_slice(&mesh_id).is_some());
+
+        // A new mesh (added, not modified) is never "reused", even with a footprint on record.
+        let readded = extracted_mesh(mesh_id, test_mesh());
+        assert!(mesh_allocator.reusable_meshes(&readded, &mut layouts).is_empty());
     }
 }

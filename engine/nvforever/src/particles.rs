@@ -430,6 +430,21 @@ impl ParticleGeometry {
             let b = (k * 4) as u32;
             self.indices.extend([b, b + 1, b + 2, b, b + 2, b + 3]);
         }
+        // A fixed size: padded to the system's most particles with empty quads (every corner
+        // on the last real vertex, colour 0: no area, no change to the bounds), so the mesh's
+        // vertex and index counts never change and the renderer rewrites it in place instead
+        // of freeing and reallocating it every frame (bevy_render mesh allocator, NVForever
+        // reuse; 2026-11-20: firing measured 47 ms frames from that churn, 29 ms without it).
+        // Ribbons keep their length.
+        if d.strip.is_none() && particles.len() < d.max && !self.positions.is_empty() {
+            let pad = d.max - particles.len();
+            let last = self.positions.len() - 1;
+            let fill = self.positions[last];
+            self.positions.extend(std::iter::repeat_n(fill, pad * 4));
+            self.uvs.extend(std::iter::repeat_n([0.0, 0.0], pad * 4));
+            self.colors.extend(std::iter::repeat_n([0.0; 4], pad * 4));
+            self.indices.extend(std::iter::repeat_n(last as u32, pad * 6));
+        }
         self.normals.resize(self.positions.len(), back.to_array());
         self.trim();
         trim(&mut self.points);
@@ -1442,6 +1457,30 @@ mod tests {
         assert!((frame_scale(&half) - 0.5).abs() < 1e-5);
         // A frame squashed to nothing sizes nothing down to zero: 1.
         assert_eq!(frame_scale(&Affine3A::from_scale(Vec3::ZERO)), 1.0);
+    }
+
+    /// A quad system's geometry has the same size whatever the number of live particles
+    /// (padded to `max` with empty quads), so its mesh keeps its allocation (rebuild notes).
+    #[test]
+    fn quad_geometry_has_a_fixed_size() {
+        let mut d = test_def(None);
+        d.max = 8;
+        let mut g = ParticleGeometry::default();
+        let sizes: Vec<(usize, usize)> = [1usize, 3, 8]
+            .iter()
+            .map(|&n| {
+                let ps: Vec<Particle> = (0..n).map(|i| test_particle(Vec3::new(i as f32, 0.0, 0.0), Vec::new())).collect();
+                g.rebuild(&d, &ps, Vec3::X, Vec3::Z, Vec3::Y);
+                (g.positions.len(), g.indices.len())
+            })
+            .collect();
+        assert!(sizes.iter().all(|&s| s == (8 * 4, 8 * 6)), "{sizes:?}");
+        // The padding adds no area: its triangles repeat one vertex.
+        let ps = vec![test_particle(Vec3::ZERO, Vec::new())];
+        g.rebuild(&d, &ps, Vec3::X, Vec3::Z, Vec3::Y);
+        for t in g.indices[6..].chunks(3) {
+            assert!(t[0] == t[1] && t[1] == t[2], "{t:?}");
+        }
     }
 
     fn test_particle(pos: Vec3, trail: Vec<Vec3>) -> Particle {
