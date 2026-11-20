@@ -118,6 +118,18 @@ pub(crate) fn half_lights_patched(source: &str) -> Option<String> {
     // tint), to measure what `nvf_light_colour`'s three pow calls per light and pixel cost.
     let colour = if std::env::var("NVF_DEBUG_LIGHT_NO_POW").is_ok_and(|v| v == "1") { "" } else { "lighting::nvf_light_colour" };
     let body = body.replace("NVF_HALF_COLOUR", colour);
+    // Diagnostic: `NVF_DEBUG_LIGHT_LOAD_ONLY=1` reads each light's record (position, range,
+    // colour) and returns a faint colour × attenuation, skipping the highlight's arithmetic:
+    // it tells the cost of fetching the lights apart from the cost of shading them.
+    let body = if std::env::var("NVF_DEBUG_LIGHT_LOAD_ONLY").is_ok_and(|v| v == "1") {
+        body.replacen(
+            "    let distance = sqrt(distance_square);\n",
+            "    if true {\n        return (*light).color_inverse_square_range.rgb * (attenuation * 1e-4);\n    }\n    let distance = sqrt(distance_square);\n",
+            1,
+        )
+    } else {
+        body
+    };
     Some(with_enable_after_imports(&body, "enable f16;"))
 }
 
