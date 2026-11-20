@@ -5347,16 +5347,25 @@ impl<'a> Game<'a> {
     /// Scripted references now in `cells` and not deleted, disabled ones included, in
     /// FormID order: those placed there that stayed, and those moved or created there.
     fn scripted_refs_in(&self, cells: &BTreeSet<FormId>) -> Vec<FormId> {
+        // A reference is here when its cell (`cell_of`: its state's, else where it was
+        // placed) is one of `cells` and it is not deleted. One state lookup each: a
+        // reference listed under a cell in `scripted_by_cell` was placed there
+        // (`data.rs`), so without a state it is in that cell. This runs every frame for
+        // every scripted reference in the loaded cells; it made `cell_of` and the state
+        // lookup twice per reference, each a walk of a map of every placed reference
+        // (about 1 ms of the Strip's frame with its overhauls, CPU sample 2026-11-20).
+        let here = |r: FormId, placed_in: Option<FormId>| match self.world.peek(r) {
+            Some(s) => s.cell.is_some_and(|c| cells.contains(&c)) && !s.deleted(),
+            None => placed_in.or_else(|| self.world.placed.get(r).and_then(|p| p.cell)).is_some_and(|c| cells.contains(&c)),
+        };
         let mut out: BTreeSet<FormId> = BTreeSet::new();
         for c in cells {
             if let Some(v) = self.data.scripted_by_cell.get(c) {
-                out.extend(v.iter().copied());
+                out.extend(v.iter().copied().filter(|&r| !self.moved.contains(&r) && here(r, Some(*c))));
             }
         }
-        out.extend(self.moved.iter().copied());
-        out.into_iter()
-            .filter(|&r| self.cell_of(r).is_some_and(|c| cells.contains(&c)) && self.world.peek(r).is_none_or(|s| !s.deleted()))
-            .collect()
+        out.extend(self.moved.iter().copied().filter(|&r| here(r, None)));
+        out.into_iter().collect()
     }
 
     /// The cells loaded around `cell`: the cell itself for an interior; for an exterior,

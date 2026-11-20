@@ -1725,13 +1725,17 @@ impl<'a> World<'a> {
         let start = own(self, id).ok_or(SimError::UnknownRef(id))?;
         let mut invert = false;
         let mut cur = id;
-        let mut seen = vec![id];
+        // The chain past `id`; empty (no allocation) for the usual reference without an
+        // enable parent, which also is not looked up a second time at the end. Callers
+        // ask this of many references every frame (presence, fades, keeping apart).
+        let mut seen: Vec<FormId> = Vec::new();
         loop {
             let parent = if self.own_enable.contains(&cur) { None } else { self.enable_parent(cur) };
             let Some(ep) = parent else {
-                return Ok(own(self, cur).unwrap_or(start) ^ invert);
+                let end = if cur == id { start } else { own(self, cur).unwrap_or(start) };
+                return Ok(end ^ invert);
             };
-            if seen.contains(&ep.reference) || own(self, ep.reference).is_none() {
+            if ep.reference == id || seen.contains(&ep.reference) || own(self, ep.reference).is_none() {
                 return Ok(start);
             }
             invert ^= ep.opposite;
