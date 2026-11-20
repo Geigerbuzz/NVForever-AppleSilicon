@@ -158,8 +158,40 @@ const fn convert_vertex_format_to_naga(format: wgt::VertexFormat) -> nt::VertexF
     }
 }
 
+/// NVForever measuring aid: `NVF_PIPELINE_LOG_MS=<ms>` logs (stderr) every shader load and
+/// pipeline-state creation that takes at least that long, with the entry point and the
+/// thread, to tell whether pipeline creation lines up with frame hitches (2026-11-20).
+pub(super) fn pipeline_log_ms() -> Option<f64> {
+    static MS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| std::env::var("NVF_PIPELINE_LOG_MS").ok().and_then(|v| v.parse::<f64>().ok()))
+}
+
+pub(super) fn log_pipeline_time(what: &str, name: &str, started: std::time::Instant) {
+    if let Some(min) = pipeline_log_ms() {
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        if ms >= min {
+            let thread = std::thread::current();
+            eprintln!("pipeline timing: {what} {name}: {ms:.1} ms on {}", thread.name().unwrap_or("?"));
+        }
+    }
+}
+
 impl super::Device {
     fn load_shader(
+        &self,
+        stage: &crate::ProgrammableStage<super::ShaderModule>,
+        vertex_buffer_mappings: &[naga::back::msl::VertexBufferMapping],
+        layout: &super::PipelineLayout,
+        primitive_class: MTLPrimitiveTopologyClass,
+        naga_stage: naga::ShaderStage,
+    ) -> Result<CompiledShader, crate::PipelineError> {
+        let started = std::time::Instant::now();
+        let r = self.load_shader_inner(stage, vertex_buffer_mappings, layout, primitive_class, naga_stage);
+        log_pipeline_time("shader", stage.entry_point, started);
+        r
+    }
+
+    fn load_shader_inner(
         &self,
         stage: &crate::ProgrammableStage<super::ShaderModule>,
         vertex_buffer_mappings: &[naga::back::msl::VertexBufferMapping],
@@ -1744,6 +1776,7 @@ impl crate::Device for super::Device {
             }
 
             // Create the pipeline from descriptor
+            let pipeline_started = std::time::Instant::now();
             let raw = match descriptor {
                 MetalGenericRenderPipelineDescriptor::Standard(d) => self
                     .shared
@@ -1764,6 +1797,7 @@ impl crate::Device for super::Device {
                     format!("new_render_pipeline_state: {e:?}"),
                 )
             })?;
+            log_pipeline_time("render pipeline", desc.label.unwrap_or("?"), pipeline_started);
 
             self.counters.render_pipelines.add(1);
 

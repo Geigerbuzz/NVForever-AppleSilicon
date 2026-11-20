@@ -1089,9 +1089,13 @@ fn pipeline_error_context(cached_pipeline: &CachedPipeline) -> String {
     }
 }
 
+// NVForever: macOS too (upstream compiled synchronously there, inside the render schedule:
+// a new pipeline froze the frame for its whole compile, 400-1700 ms hitches walking the Strip
+// and firing, 28 s of shader compiles in a 70 s run, 2026-11-20). The Metal backend wraps its
+// calls in autorelease pools, the reason upstream had kept macOS synchronous.
+// `NVF_SYNC_PIPELINES=1` compiles synchronously again (`sync`).
 #[cfg(all(
     not(target_arch = "wasm32"),
-    not(target_os = "macos"),
     feature = "multi_threaded"
 ))]
 fn create_pipeline_task(
@@ -1106,7 +1110,7 @@ fn create_pipeline_task(
             .unwrap_or_else(PoisonError::into_inner);
         PipelineTaskOutput(Some(bevy_tasks::block_on(task)))
     };
-    if !sync {
+    if !sync && !nvf_sync_pipelines() {
         return CachedPipelineState::Creating(bevy_tasks::AsyncComputeTaskPool::get().spawn(task));
     }
 
@@ -1116,9 +1120,15 @@ fn create_pipeline_task(
     }
 }
 
+/// NVForever: `NVF_SYNC_PIPELINES=1` keeps pipeline compilation synchronous (the old macOS way).
+#[cfg(all(not(target_arch = "wasm32"), feature = "multi_threaded"))]
+fn nvf_sync_pipelines() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NVF_SYNC_PIPELINES").is_ok_and(|v| v == "1"))
+}
+
 #[cfg(any(
     target_arch = "wasm32",
-    target_os = "macos",
     not(feature = "multi_threaded")
 ))]
 fn create_pipeline_task(
