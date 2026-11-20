@@ -205,6 +205,7 @@ fn patch_display_sum(mut state: ResMut<FunctionsShader>, mut shaders: ResMut<Ass
     } else {
         patched
     };
+    let patched = debug_shade_floor(patched);
     let patched = crate::fog::with_source(shader, patched);
     let _ = shaders.insert(&state.handle, patched);
     info!("lights: display-value lighting sum installed");
@@ -384,6 +385,21 @@ fn debug_light_no_specular(source: String) -> String {
         .replace(spot, "        var light_contrib = vec3(0.0);\n        if !nvf_display { light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse); }");
     info!("lights: no Bevy light highlight in world views (NVF_DEBUG_LIGHT_NO_SPECULAR; {hits} calls changed)");
     out
+}
+
+/// Diagnostic only (off by default): `NVF_DEBUG_SHADE_FLOOR=1` makes every surface's
+/// lighting its base colour, unconditionally, so the shader compiler drops the whole
+/// lighting function: what is left of the opaque pass is the floor of drawing the scene
+/// (geometry, the material's texture reads, overdraw). The wrong picture; for measuring
+/// how much of the pass is lighting arithmetic.
+fn debug_shade_floor(source: String) -> String {
+    if std::env::var("NVF_DEBUG_SHADE_FLOOR").map_or(true, |v| v != "1") {
+        return source;
+    }
+    let head = "fn nvf_apply_pbr_lighting(\n    in: pbr_types::PbrInput,\n    nvf_weights: vec2<f32>,\n) -> vec4<f32> {\n";
+    let hits = source.matches(head).count();
+    info!("lights: NVF_DEBUG_SHADE_FLOOR: lighting replaced by the base colour ({hits} functions)");
+    source.replacen(head, &format!("{head}    if true {{\n        return in.material.base_color;\n    }}\n"), 1)
 }
 
 /// Diagnostic only (off by default): `NVF_DEBUG_LIGHTS=off` places no lights of the game's
