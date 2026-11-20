@@ -733,6 +733,12 @@ fn apply_shadow_step(commands: &mut Commands, sky: &SkyState, start: (bool, f32,
 /// 2026-11-02 (#1369): by night the light is dimmer and softer and the dark hides the far
 /// shadows; by day's settings they cost about 2.5 ms on the Strip at 22:00, RTX 4070].
 pub const MOON_SHADOW_DISTANCE: f32 = 3_000.0;
+/// How far the interior light's shadows reach, in 2 cascades [engineering choice,
+/// 2026-11-20]: an interior is rarely more than a cell (4,096 units) across (the empty test
+/// room's fog ends at 3,750), so the outdoor layout's 4 cascades out to 12,000 units drew
+/// and looked up maps of empty space. Indoors there were 4 shadow views a frame and up to
+/// two map reads per pixel where the cascades overlap; now 2.
+pub const INTERIOR_SHADOW_DISTANCE: f32 = 4_096.0;
 /// Below this share of its strength (the fade at the horizon) the sun or moon casts no
 /// shadows at all: its maps are not drawn [engineering choice: at a tenth of the light the
 /// shadow is too faint to see go].
@@ -744,15 +750,18 @@ enum SunShadows {
     Day,
     Moon,
     Faded,
+    /// Indoors: the cell's directional light (XCLL), shadowed over [`INTERIOR_SHADOW_DISTANCE`]
+    /// in 2 cascades.
+    Interior,
 }
 
 impl SunShadows {
     /// For the sun's height above the horizon (below 0: the moon) and the light's fade.
     /// Indoors the sun is the cell's directional light (XCLL), which has nothing to do with
-    /// the hour outside: it casts the day's shadows.
+    /// the hour outside: it casts the interior's shadows ([`SunShadows::Interior`]).
     fn at(indoors: bool, height: f32, fade: f32) -> Self {
         if indoors {
-            SunShadows::Day
+            SunShadows::Interior
         } else if fade < SHADOW_FADED {
             SunShadows::Faded
         } else if height < 0.0 {
@@ -785,6 +794,7 @@ impl SunShadowKey {
             SunShadows::Faded => None,
             SunShadows::Moon => Some(crate::sky::shadow_cascades(MOON_SHADOW_DISTANCE.min(self.distance), 1.0, crate::sky::CascadeLayout::Spaced(1), self.map)),
             SunShadows::Day => Some(crate::sky::shadow_cascades(self.distance, self.reach, self.cascades, self.map)),
+            SunShadows::Interior => Some(crate::sky::shadow_cascades(INTERIOR_SHADOW_DISTANCE.min(self.distance), 1.0, crate::sky::CascadeLayout::Spaced(2), self.map)),
         }
     }
 }
@@ -1274,8 +1284,8 @@ mod tests {
         assert_eq!(SunShadows::at(false, -0.005, 0.05), SunShadows::Faded, "moonset");
         assert_eq!(SunShadows::at(false, 0.02, SHADOW_FADED), SunShadows::Day, "back on at the threshold");
         // Indoors the sun is the cell's light: the day's shadows whatever the hour outside.
-        assert_eq!(SunShadows::at(true, -0.5, 1.0), SunShadows::Day, "an interior at night");
-        assert_eq!(SunShadows::at(true, 0.005, 0.05), SunShadows::Day, "an interior at dawn");
+        assert_eq!(SunShadows::at(true, -0.5, 1.0), SunShadows::Interior, "an interior at night");
+        assert_eq!(SunShadows::at(true, 0.005, 0.05), SunShadows::Interior, "an interior at dawn");
     }
 
     #[derive(Resource)]
@@ -1363,7 +1373,7 @@ mod tests {
         sky.shadows = true;
         sky.shadow_distance = crate::sky::DEFAULT_SHADOW_DISTANCE;
         sky.shadow_reach = 1.0;
-        // Indoors the sun casts the day's cascades whatever the hour.
+        // Indoors the sun casts the interior's cascades whatever the hour.
         sky.interior = Some(Default::default());
         world.insert_resource(sky);
         world.insert_resource(DirectionalLightShadowMap { size: SHADOW_MAP });
@@ -1373,15 +1383,17 @@ mod tests {
             let c = w.get::<CascadeShadowConfig>(sun).unwrap();
             (c.bounds.clone(), c.overlap_proportion)
         };
+        let indoor = |map| crate::sky::shadow_cascades(INTERIOR_SHADOW_DISTANCE.min(crate::sky::DEFAULT_SHADOW_DISTANCE), 1.0, CascadeLayout::Spaced(2), map);
         set_shadow_resolution_choice(&mut world, 1);
-        assert_eq!(config(&world), (day(4096).bounds, day(4096).overlap_proportion));
+        assert_eq!(config(&world), (indoor(4096).bounds, indoor(4096).overlap_proportion));
         set_shadow_resolution_choice(&mut world, 0);
-        assert_eq!(config(&world), (day(2048).bounds, day(2048).overlap_proportion));
+        assert_eq!(config(&world), (indoor(2048).bounds, indoor(2048).overlap_proportion));
+        assert_eq!(config(&world).0.len(), 2, "two interior cascades");
         // With the shadows off the map changes and the cascades stay.
         world.resource_mut::<SkyState>().shadows = false;
         set_shadow_resolution_choice(&mut world, 1);
         assert_eq!(world.resource::<DirectionalLightShadowMap>().size, 4096);
-        assert_eq!(config(&world).0, day(2048).bounds);
+        assert_eq!(config(&world).0, indoor(2048).bounds);
         // The key's cascades: none faded or off, the moon's single one by night.
         let key = SunShadowKey { phase: SunShadows::Moon, shadows: true, distance: 8000.0, reach: 1.5, cascades: CascadeLayout::Quality, map: 4096 };
         assert_eq!(key.wanted().unwrap().bounds, vec![MOON_SHADOW_DISTANCE]);
@@ -1397,7 +1409,7 @@ mod tests {
         world.resource_mut::<SkyState>().shadows = true;
         world.resource_mut::<SkyState>().shadow_distance = 0.0;
         set_shadow_resolution_choice(&mut world, 0);
-        assert_eq!(config(&world).0, day(2048).bounds);
+        assert_eq!(config(&world).0, indoor(2048).bounds);
     }
 
     /// The Shadow resolution row changes the key's map size: Quality's layout follows it
@@ -1442,10 +1454,12 @@ mod tests {
         let sun = spawn_day_sun(&mut app);
         app.update();
         assert_eq!(bounds(&app, sun).len(), 1);
-        // Indoors the key's phase is Day (SunShadows::at with indoors), whatever the hour.
+        // Indoors the key's phase is Interior (SunShadows::at with indoors), whatever the
+        // hour: 2 cascades over INTERIOR_SHADOW_DISTANCE.
         app.world_mut().resource_mut::<TestKey>().0.phase = SunShadows::at(true, -0.5, 1.0);
         app.update();
-        assert_eq!(bounds(&app, sun), crate::sky::shadow_cascades(8000.0, 1.0, crate::sky::CascadeLayout::Quality, 2048).bounds);
+        assert_eq!(bounds(&app, sun), crate::sky::shadow_cascades(INTERIOR_SHADOW_DISTANCE, 1.0, crate::sky::CascadeLayout::Spaced(2), 2048).bounds);
+        assert_eq!(bounds(&app, sun).len(), 2);
         // And back out into the night.
         app.world_mut().resource_mut::<TestKey>().0.phase = SunShadows::at(false, -0.5, 1.0);
         app.update();
