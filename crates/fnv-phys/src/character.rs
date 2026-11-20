@@ -418,12 +418,26 @@ fn capsule(p: &CharacterParams, k: f32) -> SharedShape {
                 points.push(Vector::new(rr * a.cos(), rr * a.sin(), z) * k);
             }
         }
+        // The same hull with its support point found directly (`crate::ring_hull`);
+        // `NVF_PHYS_RING_HULL=0` (a test aid, read once) keeps parry's hull.
+        if ring_hull_enabled() {
+            if let Some(hull) = crate::ring_hull::RingHull::new(&points, RING_POINTS, 4) {
+                return SharedShape(std::sync::Arc::new(hull));
+            }
+        }
         if let Some(hull) = SharedShape::convex_hull(&points) {
             return hull;
         }
     }
     let half = (half - p.radius).max(0.0) * k;
     SharedShape::capsule(Vector::Z * -half, Vector::Z * half, p.radius * k)
+}
+
+/// Whether the cone-ended character shape is a [`crate::ring_hull::RingHull`]:
+/// `NVF_PHYS_RING_HULL=0` builds parry's plain hull (a test aid for comparing, read once).
+fn ring_hull_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NVF_PHYS_RING_HULL").map_or(true, |v| v != "0"))
 }
 
 /// Points per ring of a cone-bottomed character shape [engineering choice: the polygon

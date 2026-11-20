@@ -48,6 +48,7 @@ pub mod placed;
 pub mod primitive;
 pub mod quarantine;
 pub mod ragdoll;
+pub mod ring_hull;
 pub mod script;
 pub mod swim;
 pub mod terrain;

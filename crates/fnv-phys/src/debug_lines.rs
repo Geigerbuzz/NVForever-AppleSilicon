@@ -209,12 +209,16 @@ impl CollisionLines {
         };
         self.pipeline.render_colliders(&mut g, &world.w.bodies, &world.w.colliders);
         // rapier draws no shape of its users' own: the hulls with large faces
-        // (`crate::hull`) are drawn here, edge by edge as rapier draws a hull.
+        // (`crate::hull`) and the characters' ring hulls (`crate::ring_hull`) are drawn
+        // here, edge by edge as rapier draws a hull.
         for (h, co) in world.w.colliders.iter() {
-            let Some(hull) = co.shape().as_shape::<crate::hull::Hull>() else { continue };
+            let poly = match (co.shape().as_shape::<crate::hull::Hull>(), co.shape().as_shape::<crate::ring_hull::RingHull>()) {
+                (Some(hull), _) => hull.polyhedron(),
+                (_, Some(ring)) => ring.polyhedron(),
+                _ => continue,
+            };
             let object = DebugRenderObject::Collider(h, co);
             if g.filter_object(object) {
-                let poly = hull.polyhedron();
                 let edges: Vec<[u32; 2]> = poly.edges().iter().map(|e| e.vertices).collect();
                 g.draw_polyline(object, poly.points(), &edges, co.position(), rapier3d::math::Vector::splat(1.0), [0.0; 4]);
             }

@@ -1287,8 +1287,8 @@ impl PhysWorld {
             }
         }
         for (_, c) in self.w.colliders.iter() {
-            // A hull with large faces (`crate::hull`) counts as the hull it is.
-            let t = if c.shape().as_shape::<crate::hull::Hull>().is_some() { ShapeType::ConvexPolyhedron } else { c.shape().shape_type() };
+            // A hull with large faces (`crate::hull`) or a character's ring hull counts as the hull it is.
+            let t = if c.shape().as_shape::<crate::hull::Hull>().is_some() || c.shape().as_shape::<crate::ring_hull::RingHull>().is_some() { ShapeType::ConvexPolyhedron } else { c.shape().shape_type() };
             *s.colliders.entry(shape_name(t)).or_default() += 1;
         }
         s.bodies_awake = self.w.islands.num_active_bodies();
