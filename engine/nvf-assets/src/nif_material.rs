@@ -715,6 +715,16 @@ impl MaterialExtension for NifSurface {
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         nif_prepass(descriptor, key.mesh_key);
+        // Measuring aid: `NVF_DEBUG_MAT_STOP=1|2|3` ends the main pass's fragment shader early
+        // (nif_material.wesl NVF_STOP_n: after the surface is read, before the lighting,
+        // before fog), to tell what each part of it costs. Wrong pictures; never for play.
+        if let Some(n) = std::env::var("NVF_DEBUG_MAT_STOP").ok().filter(|n| matches!(n.as_str(), "1" | "2" | "3")) {
+            if !descriptor.vertex.shader_defs.contains(&ShaderDefVal::from("PREPASS_PIPELINE")) {
+                if let Some(fragment) = descriptor.fragment.as_mut() {
+                    fragment.shader_defs.push(ShaderDefVal::Bool(format!("NVF_STOP_{n}").into(), true));
+                }
+            }
+        }
         if key.bind_group_data.first_person {
             first_person_depth(descriptor, key.mesh_key);
         }

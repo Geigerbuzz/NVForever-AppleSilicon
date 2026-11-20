@@ -1205,11 +1205,22 @@ fn draw(
             // Its mesh keeps its last geometry, hidden, until a camera may see it again.
             continue;
         }
+        // Measuring aid (2026-11-20): `NVF_PARTICLE_NO_UPLOAD=1` simulates and culls as
+        // usual but never rewrites the systems' meshes (nothing new reaches the GPU), to
+        // tell the cost of the per-frame mesh rebuild and upload from the rest.
+        if no_upload() {
+            continue;
+        }
         let Some(mut mesh) = meshes.get_mut(&live.mesh) else { continue };
         live.geometry.rebuild(&live.def, &live.particles, right, up, back);
         let matched = live.geometry.swap_into_mesh(&mut mesh);
         debug_assert!(matched, "particles: {}: mesh layout differs from particle_mesh's; geometry inserted", live.def.name);
     }
+}
+
+fn no_upload() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NVF_PARTICLE_NO_UPLOAD").is_ok_and(|v| v == "1"))
 }
 
 /// A game-space box holding every vertex [`ParticleGeometry::rebuild`] makes of

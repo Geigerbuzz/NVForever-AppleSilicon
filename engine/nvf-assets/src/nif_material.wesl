@@ -258,6 +258,12 @@ fn tony_inverse(y: f32) -> f32 {
 // (window light rays, white × 1 under a warm emittance colour) and the dark parts of a
 // glow map keep the tonemapper; the lantern glass (× 10) and neon (× 25) burn.
 fn hot_light(lit: vec3<f32>, e: vec3<f32>) -> vec3<f32> {
+    // Below 0.8 the blend weight is 0 and the result is `lit + e` exactly: return it before
+    // the three table walks (dynamic indexing into private arrays on every lit pixel, ~2 ms
+    // a frame at 3024 x 1964 for surfaces that emit nothing; 2026-11-20).
+    if max(e.r, max(e.g, e.b)) <= 0.8 {
+        return lit + e;
+    }
     let d = min(lit + e, vec3(HOT_MAX));
     let hot = vec3(tony_inverse(d.r), tony_inverse(d.g), tony_inverse(d.b));
     return mix(lit + e, hot, smoothstep(0.8, 1.5, max(e.r, max(e.g, e.b))));
@@ -541,6 +547,12 @@ fn nif_fragment(
     }
     @if(!TERRAIN_ANTI_TILING) var pbr_input = pbr_input_from_standard_material(vin, is_front);
     @if(TERRAIN_ANTI_TILING) var pbr_input = terrain_pbr_standard(vin, is_front, terrain_fp);
+    // Measuring aid (NVF_DEBUG_MAT_STOP, nif_material.rs): stop after the surface is read.
+    @if(NVF_STOP_1 && !PREPASS_PIPELINE) {
+        var nvf_stop: FragmentOutput;
+        nvf_stop.color = pbr_input.material.base_color + vec4(pbr_input.N * 1e-6 + pbr_input.world_normal * 1e-6 + pbr_input.material.emissive.rgb * 1e-6 + vec3(pbr_input.material.perceptual_roughness + pbr_input.material.metallic + pbr_input.diffuse_occlusion.x) * 1e-6, 0.0);
+        return nvf_stop;
+    }
     @if(FACEGEN_TINT && VERTEX_UVS_A) if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_BASE_COLOR_TEXTURE_BIT) != 0u {
         // base_color is material colour × vertex colour × texel: the texel is read again
         // as pbr_input_from_standard_material reads it, and its tinted value takes its
@@ -669,6 +681,12 @@ fn nif_fragment(
         // Hot light source (hot_light): the emitted light is added after the lighting.
         @if(!PREPASS_PIPELINE && !TONEMAP_IN_SHADER && !BLEND_MULTIPLY) let hot_e = pbr_input.material.emissive.rgb;
         @if(!PREPASS_PIPELINE && !TONEMAP_IN_SHADER && !BLEND_MULTIPLY) pbr_input.material.emissive = vec4(vec3(0.0), pbr_input.material.emissive.a);
+        // Measuring aid (NVF_DEBUG_MAT_STOP): stop before the lighting.
+        @if(NVF_STOP_2 && !PREPASS_PIPELINE) {
+            var nvf_stop: FragmentOutput;
+            nvf_stop.color = pbr_input.material.base_color + vec4(pbr_input.N * 1e-6 + pbr_input.world_normal * 1e-6 + pbr_input.material.emissive.rgb * 1e-6 + vec3(pbr_input.material.perceptual_roughness + pbr_input.material.metallic + pbr_input.diffuse_occlusion.x) * 1e-6, 0.0);
+            return nvf_stop;
+        }
         out.color = apply_pbr_lighting(pbr_input);
         @if(!PREPASS_PIPELINE && SHADE_LIGHT) out.color = with_shade_light(pbr_input, out.color);
         // Bevy's ambient light is not added any more (nvforever lights.rs `lean_lighting`,
@@ -735,6 +753,10 @@ fn nif_fragment(
     // original's 206 (nvf-play pipboy/device_screen.rs). Before the post-lighting step, which
     // tone maps here when the view has no HDR (the Glow setting off).
     @if(PIPBOY_SCREEN) out.color.r = min(out.color.r, 0.67);
+    // Measuring aid (NVF_DEBUG_MAT_STOP): stop before fog and the post-lighting step.
+    @if(NVF_STOP_3 && !PREPASS_PIPELINE) {
+        return out;
+    }
     @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY && !BLEND_PREMULTIPLIED_ALPHA) out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY) let blend_mode = pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
     @if(!PREPASS_PIPELINE && !BLEND_MULTIPLY) if blend_mode == STANDARD_MATERIAL_FLAGS_ALPHA_MODE_BLEND && (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) != 0u {

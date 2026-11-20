@@ -690,10 +690,13 @@ fn read_input(
 }
 
 /// Actors walked by another system whose moves are planned on the compute pool when at
-/// least this many move, in chunks of [`MOVE_CHUNK`] [engineering choice: fewer are
-/// cheaper on this thread].
-const PARALLEL_MOVES: usize = 8;
-const MOVE_CHUNK: usize = 4;
+/// least this many move, in chunks of [`MOVE_CHUNK`] [engineering choice]. Was 8 in chunks
+/// of 4: a typical Strip step moves fewer than 8, so every plan ran in turn on the main
+/// thread, ~0.2 ms each (`PhysWorld::plan_move_full`, 15% of the main thread in a CPU
+/// profile, 2026-11-20), while the compute pool idled. A plan only reads the world and the
+/// moves are applied in the same order after, so the result is the same either way.
+const PARALLEL_MOVES: usize = 2;
+const MOVE_CHUNK: usize = 1;
 
 /// While the player aims (Block held with a weapon out) they move at walking speed, not
 /// running, and the body walks [design: the owner's wish, playtest of 2026-10-11, "reduced
