@@ -136,40 +136,54 @@ fn property_table(data: &GameData, model: &str) -> HashMap<String, Props> {
     out
 }
 
-/// The world-space bounding sphere of `node` and what lies under it: of its shapes'
-/// boxes, or the node's own place (radius 0) without any.
-fn node_bound(at: usize, tree: &[(Entity, Option<usize>)], globals: &Query<&GlobalTransform>, boxes: &Query<&Aabb>) -> Option<[f32; 4]> {
-    let mut spheres: Vec<(Vec3, f32)> = Vec::new();
-    for (k, (e, _)) in tree.iter().enumerate() {
-        // k under `at` (or `at` itself).
-        let mut up = Some(k);
-        let mut under = false;
-        while let Some(i) = up {
-            if i == at {
-                under = true;
-                break;
+/// The world-space bounding sphere of every node of `tree` (a [`walk`]: depth first, each
+/// parent before its children) and what lies under it: of its shapes' boxes, or the node's
+/// own place (radius 0) without any.
+///
+/// Each shape's sphere is worked out once, and a node's subtree is the run of entries after
+/// it that sit deeper (depth first order keeps a subtree together), so the whole tree costs
+/// about nodes × depth. It was a scan of the whole tree per node, walking each entry's
+/// ancestors and decomposing each shape's transform again for every node above it: about
+/// 18% of a helper thread at the Strip with its walking residents (2026-11-20, `sample`,
+/// M2 Pro), where the main thread waited for it. Same spheres in the same order, so the
+/// same bounds.
+fn node_bounds(tree: &[(Entity, Option<usize>)], globals: &Query<&GlobalTransform>, boxes: &Query<&Aabb>) -> Vec<Option<[f32; 4]>> {
+    let spheres: Vec<Option<(Vec3, f32)>> = tree
+        .iter()
+        .map(|(e, _)| match (boxes.get(*e), globals.get(*e)) {
+            (Ok(b), Ok(g)) => {
+                let c = g.transform_point(Vec3::from(b.center));
+                let s = g.compute_transform().scale.abs().max_element();
+                Some((c, Vec3::from(b.half_extents).length() * s))
             }
-            up = tree[i].1;
-        }
-        if !under {
-            continue;
-        }
-        if let (Ok(b), Ok(g)) = (boxes.get(*e), globals.get(*e)) {
-            let c = g.transform_point(Vec3::from(b.center));
-            let s = g.compute_transform().scale.abs().max_element();
-            spheres.push((c, Vec3::from(b.half_extents).length() * s));
-        }
+            _ => None,
+        })
+        .collect();
+    let mut depth = vec![0usize; tree.len()];
+    for k in 0..tree.len() {
+        // A parent comes before its children (`walk`); a parent index at or after k
+        // would be a malformed tree, taken as a top-level node.
+        depth[k] = tree[k].1.filter(|&p| p < k).map_or(0, |p| depth[p] + 1);
     }
-    let own = globals.get(tree.get(at)?.0).ok()?.translation();
-    let (centre, radius) = if spheres.is_empty() {
-        (own, 0.0)
-    } else {
-        let (lo, hi) = spheres.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), (c, r)| (lo.min(*c - *r), hi.max(*c + *r)));
-        let mid = (lo + hi) / 2.0;
-        (mid, spheres.iter().map(|(c, r)| c.distance(mid) + r).fold(0.0, f32::max))
-    };
-    let g = nvf_play::space::to_game(centre);
-    Some([g[0], g[1], g[2], radius])
+    (0..tree.len())
+        .map(|at| {
+            let mut end = at + 1;
+            while end < tree.len() && depth[end] > depth[at] {
+                end += 1;
+            }
+            let under = || spheres[at..end].iter().flatten();
+            let own = globals.get(tree[at].0).ok()?.translation();
+            let (centre, radius) = if under().next().is_none() {
+                (own, 0.0)
+            } else {
+                let (lo, hi) = under().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), (c, r)| (lo.min(*c - *r), hi.max(*c + *r)));
+                let mid = (lo + hi) / 2.0;
+                (mid, under().map(|(c, r)| c.distance(mid) + r).fold(0.0, f32::max))
+            };
+            let g = nvf_play::space::to_game(centre);
+            Some([g[0], g[1], g[2], radius])
+        })
+        .collect()
 }
 
 /// What the mirror reads beside the nodes: their places in the world and boxes (bounds),
@@ -345,6 +359,14 @@ pub(crate) struct RigNames {
     names: HashMap<Entity, String>,
 }
 
+/// [`rig_names`] once per reference and view per frame: the mirror asks for the same rig's
+/// names in each of its passes (edits, holds, pending holds, bound holds, watched trees), and
+/// each answer was a map of every bone's name, copied. The rigs do not change inside the
+/// system (its spawns and despawns are deferred commands).
+fn cached_rig<'c>(cache: &'c mut HashMap<(u32, ModelView), RigNames>, r: u32, view: ModelView, rigs: &Rigs) -> &'c RigNames {
+    cache.entry((r, view)).or_insert_with(|| rig_names(r, view, rigs))
+}
+
 pub(crate) fn rig_names(r: u32, view: ModelView, rigs: &Rigs) -> RigNames {
     rig_of(r, view, rigs)
         .map(|(root, a)| RigNames { root: Some(root), names: a.nodes.iter().zip(&a.skel.names).filter_map(|(e, n)| n.clone().map(|n| (*e, n))).collect() })
@@ -353,22 +375,38 @@ pub(crate) fn rig_names(r: u32, view: ModelView, rigs: &Rigs) -> RigNames {
 
 /// A node's name: an actor root's from its skeleton, else its `Name`, else the rig's.
 fn name_of(e: Entity, nodes: &NodeQuery, rig: &RigNames) -> String {
+    name_ref(e, nodes, rig).to_string()
+}
+
+/// [`name_of`] without the copy, for comparing.
+fn name_ref<'a>(e: Entity, nodes: &'a NodeQuery, rig: &'a RigNames) -> &'a str {
     let node = nodes.get(e).ok();
     if let Some(name) = node.as_ref().filter(|n| n.4).and_then(|n| n.0) {
-        return name.as_str().to_string();
+        return name.as_str();
     }
     if rig.root == Some(e) {
         if let Some(n) = rig.names.get(&e) {
-            return n.clone();
+            return n;
         }
     }
-    node.and_then(|n| n.0.map(|n| n.as_str().to_string())).or_else(|| rig.names.get(&e).cloned()).unwrap_or_default()
+    node.and_then(|n| n.0.map(|n| n.as_str())).or_else(|| rig.names.get(&e).map(String::as_str)).unwrap_or_default()
 }
 
-/// The node of that name under `root`: exactly, else without regard to case.
+/// The node of that name under `root`: exactly, else without regard to case. One walk and
+/// no copies of names (it was two passes that made a String of every node's name; the
+/// mirror calls it for every pending hold every frame).
 pub(crate) fn find(root: Entity, name: &str, nodes: &NodeQuery, rig: &RigNames) -> Option<Entity> {
-    let all = walk(root, nodes, rig);
-    all.iter().map(|(e, _)| *e).find(|&e| name_of(e, nodes, rig) == name).or_else(|| all.iter().map(|(e, _)| *e).find(|&e| name_of(e, nodes, rig).eq_ignore_ascii_case(name)))
+    let mut caseless = None;
+    for (e, _) in walk(root, nodes, rig) {
+        let n = name_ref(e, nodes, rig);
+        if n == name {
+            return Some(e);
+        }
+        if caseless.is_none() && n.eq_ignore_ascii_case(name) {
+            caseless = Some(e);
+        }
+    }
+    caseless
 }
 
 type HeldModels = HashMap<(u32, ModelView, String), Held>;
@@ -506,6 +544,7 @@ fn mirror_game(
 ) {
     let Memory { logged, held, bound_held, pending_held, edit_order, tables, materials, owned, attachment_materials, props, files } = mem;
     let roots = VisualRoots::new(&visuals);
+    let mut rig_cache: HashMap<(u32, ModelView), RigNames> = HashMap::new();
     game.scene.use_separate_player_models();
     let edits = game.scene.take_targeted_edits();
     let mut edits_rest = Vec::new();
@@ -560,7 +599,7 @@ fn mirror_game(
             continue;
         }
         let Some(root) = root else { continue };
-        let rig = rig_names(r.0, view, &rigs);
+        let rig = cached_rig(&mut rig_cache, r.0, view, &rigs);
         let entity = match queued.target {
             SceneTarget::Node(identity) => {
                 let Some(entity) = bound_entity(root, identity, &nodes, &rig) else { continue };
@@ -580,7 +619,7 @@ fn mirror_game(
             SceneEdit::ForModel { .. } => continue,
         };
         let Some(root) = root_of_indexed(r.0, view, &rigs, &roots) else { continue };
-        let rig = rig_names(r.0, view, &rigs);
+        let rig = cached_rig(&mut rig_cache, r.0, view, &rigs);
         // Cold compatibility and the legacy file path resolve once by name/index. Keeping
         // an absent entity is significant: particle/material handlers historically
         // did work before or without finding a concrete shape.
@@ -715,7 +754,7 @@ fn mirror_game(
     let keys: Vec<(u32, ModelView, String)> = held.keys().cloned().collect();
     for (r, view, node) in keys {
         let Some(root) = root_of_indexed(r, view, &rigs, &roots) else { continue };
-        let rig = rig_names(r, view, &rigs);
+        let rig = cached_rig(&mut rig_cache, r, view, &rigs);
         let h = held[&(r, view, node.clone())];
         apply_held(root, &node, h, &mut nodes, &rig);
     }
@@ -727,7 +766,7 @@ fn mirror_game(
         let model = root.to_bits();
         if pending.model.is_some_and(|captured| captured != model) { return false }
         pending.model = Some(model);
-        let rig = rig_names(r, view, &rigs);
+        let rig = cached_rig(&mut rig_cache, r, view, &rigs);
         let Some(entity) = find(root, name, &nodes, &rig) else { return true };
         let identity = SceneIdentity { model, node: entity.to_bits() };
         if bound_entity(root, identity, &nodes, &rig).is_none() { return true }
@@ -739,7 +778,7 @@ fn mirror_game(
     // disappearance, immediate root replacement, child ABA or subtree departure expires it.
     bound_held.retain(|&(r, view, identity), value| {
         let Some(root) = root_of_indexed(r, view, &rigs, &roots) else { return false };
-        let rig = rig_names(r, view, &rigs);
+        let rig = cached_rig(&mut rig_cache, r, view, &rigs);
         let Some(entity) = bound_entity(root, identity, &nodes, &rig) else { return false };
         apply_value(entity, value.value, &mut nodes);
         true
@@ -816,26 +855,31 @@ fn mirror_game(
                 game.scene.forget_model(r, view);
                 continue;
             }
-            let rig = rig_names(r.0, view, &rigs);
+            let rig = cached_rig(&mut rig_cache, r.0, view, &rigs);
             let mut seen: HashMap<String, u32> = HashMap::new();
             // Per-view cache keys do not establish per-view file ownership. Until
             // the first-person model's actual shape source is supplied, metadata
             // from MODL/placed systems of the reference is unavailable for that rig.
             let model = if view == ModelView::FirstPerson { None }
                 else { fnv_game::nif_blocks::model_of(game, r) };
-            let table = match (data.as_deref(), model.as_deref()) {
-                (Some(d), Some(model)) => tables.entry(model.to_string()).or_insert_with(|| material_table(d, model)).clone(),
-                _ => HashMap::new(),
-            };
-            let props = match (data.as_deref(), model.as_deref()) {
-                (Some(d), Some(model)) => props.entry(model.to_string()).or_insert_with(|| property_table(d, model)).clone(),
-                _ => HashMap::new(),
-            };
+            // The model's tables, read in place: they were cloned whole for every watched
+            // reference every frame.
+            if let (Some(d), Some(model)) = (data.as_deref(), model.as_deref()) {
+                if !tables.contains_key(model) {
+                    tables.insert(model.to_string(), material_table(d, model));
+                }
+                if !props.contains_key(model) {
+                    props.insert(model.to_string(), property_table(d, model));
+                }
+            }
+            let table = data.as_deref().and(model.as_deref()).and_then(|m| tables.get(m));
+            let props = data.as_deref().and(model.as_deref()).and_then(|m| props.get(m));
             let systems: Vec<(String, Option<String>, [f32; 21])> = if view == ModelView::FirstPerson { Vec::new() } else { particles
                 .as_deref_mut()
                 .map(|p| crate::particles::placed_systems(p, r.0).into_iter().map(|d| (d.name.clone(), d.emitter.object.clone(), crate::particles::script_values(d))).collect())
                 .unwrap_or_default() };
             let walked = walk(root, &nodes, &rig);
+            let bounds = node_bounds(&walked, &globals, &boxes);
             let tree: Vec<SceneNode> = walked
                 .iter()
                 .enumerate()
@@ -850,11 +894,11 @@ fn mirror_game(
                     let (z, y, x) = t.rotation.to_euler(EulerRot::ZYX);
                     let material = if let Some(attached) = attached { attachment_materials.get(&e).copied().or(attached.material) }
                         else if view == ModelView::FirstPerson { None }
-                        else { materials.get(&(r.0, view, shown.clone())).or_else(|| table.get(&base)).copied() };
+                        else { materials.get(&(r.0, view, shown.clone())).or_else(|| table.and_then(|t| t.get(&base))).copied() };
                     let (alpha, stencil) = attached.map(|n| (n.source.alpha, n.source.stencil))
-                        .unwrap_or_else(|| props.get(&base).copied().unwrap_or_default());
+                        .unwrap_or_else(|| props.and_then(|p| p.get(&base)).copied().unwrap_or_default());
                     let emitter = if attached.is_some() { None } else { systems.iter().find(|(n, o, _)| n.eq_ignore_ascii_case(&base) || o.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(&base))).map(|s| s.2) };
-                    let info = NodeInfo { identity: Some(SceneIdentity { model: root.to_bits(), node: e.to_bits() }), bound: node_bound(k, &walked, &globals, &boxes), emitter, alpha, stencil };
+                    let info = NodeInfo { identity: Some(SceneIdentity { model: root.to_bits(), node: e.to_bits() }), bound: bounds[k], emitter, alpha, stencil };
                     Some(SceneNode {
                         name: shown,
                         parent,
@@ -880,7 +924,7 @@ fn mirror_game(
     for (r, node) in wanted {
         let view = concrete_view(r.0, ModelView::Reference);
         let verts = root_of_indexed(r.0, view, &rigs, &roots)
-            .and_then(|root| find(root, &node, &nodes, &rig_names(r.0, view, &rigs)))
+            .and_then(|root| find(root, &node, &nodes, cached_rig(&mut rig_cache, r.0, view, &rigs)))
             .and_then(|e| shapes.get(e).ok())
             .and_then(|m| meshes.as_deref()?.get(&m.0))
             // `try_`: a mesh extracted to the render world gives none, where `attribute` panics (#2202).
@@ -1002,5 +1046,76 @@ mod tests {
         assert_eq!(world.get::<Transform>(third_bone).unwrap().translation, Vec3::new(30.0, 0.0, 0.0));
         assert_eq!(world.get::<Transform>(first_bone).unwrap().scale, Vec3::splat(2.0));
         assert_eq!(world.get::<Transform>(third_bone).unwrap().scale, Vec3::splat(3.0));
+    }
+}
+
+#[cfg(test)]
+mod node_bounds_tests {
+    use super::*;
+    use bevy::ecs::system::SystemState;
+
+    /// The per-node scan `node_bounds` replaced, kept as the reference it must agree with.
+    fn node_bound_scan(at: usize, tree: &[(Entity, Option<usize>)], globals: &Query<&GlobalTransform>, boxes: &Query<&Aabb>) -> Option<[f32; 4]> {
+        let mut spheres: Vec<(Vec3, f32)> = Vec::new();
+        for (k, (e, _)) in tree.iter().enumerate() {
+            let mut up = Some(k);
+            let mut under = false;
+            while let Some(i) = up {
+                if i == at {
+                    under = true;
+                    break;
+                }
+                up = tree[i].1;
+            }
+            if !under {
+                continue;
+            }
+            if let (Ok(b), Ok(g)) = (boxes.get(*e), globals.get(*e)) {
+                let c = g.transform_point(Vec3::from(b.center));
+                let s = g.compute_transform().scale.abs().max_element();
+                spheres.push((c, Vec3::from(b.half_extents).length() * s));
+            }
+        }
+        let own = globals.get(tree.get(at)?.0).ok()?.translation();
+        let (centre, radius) = if spheres.is_empty() {
+            (own, 0.0)
+        } else {
+            let (lo, hi) = spheres.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), (c, r)| (lo.min(*c - *r), hi.max(*c + *r)));
+            let mid = (lo + hi) / 2.0;
+            (mid, spheres.iter().map(|(c, r)| c.distance(mid) + r).fold(0.0, f32::max))
+        };
+        let g = nvf_play::space::to_game(centre);
+        Some([g[0], g[1], g[2], radius])
+    }
+
+    #[test]
+    fn one_pass_bounds_equal_the_per_node_scan() {
+        let mut world = World::new();
+        let at = |x: f32, y: f32, z: f32, turn: f32, scale: f32| {
+            GlobalTransform::from(Transform::from_xyz(x, y, z).with_rotation(Quat::from_rotation_z(turn)).with_scale(Vec3::new(scale, scale * 0.5, -scale)))
+        };
+        let shape = |cx: f32, h: f32| Aabb { center: Vec3::new(cx, 0.5, -1.0).into(), half_extents: Vec3::new(h, h * 2.0, 0.25).into() };
+        // Depth first, as `walk` gives it: two top-level branches, one three deep; nodes
+        // with and without boxes; one with no GlobalTransform at all.
+        let e: Vec<Entity> = vec![
+            world.spawn(at(0.0, 0.0, 0.0, 0.0, 1.0)).id(),                  // 0 root, no box
+            world.spawn((at(10.0, 2.0, 1.0, 0.7, 2.0), shape(1.0, 3.0))).id(), // 1 under 0
+            world.spawn((at(12.0, -4.0, 9.0, 2.1, 0.5), shape(-2.0, 1.5))).id(), // 2 under 1
+            world.spawn(at(14.0, 1.0, -3.0, 0.0, 1.0)).id(),                // 3 under 2, no box
+            world.spawn((at(-30.0, 5.0, 2.0, -1.2, 3.0), shape(0.0, 0.5))).id(), // 4 under 0
+            world.spawn(shape(4.0, 1.0)).id(),                              // 5 under 4, no transform
+            world.spawn((at(-31.0, 6.0, 2.5, 0.3, 1.0), shape(2.0, 2.0))).id(),  // 6 under 4
+            world.spawn((at(50.0, 50.0, 50.0, 0.0, 1.0), shape(0.0, 9.0))).id(), // 7 top level
+        ];
+        let parents = [None, Some(0), Some(1), Some(2), Some(0), Some(4), Some(4), None];
+        let tree: Vec<(Entity, Option<usize>)> = e.iter().copied().zip(parents).collect();
+        let mut state: SystemState<(Query<&GlobalTransform>, Query<&Aabb>)> = SystemState::new(&mut world);
+        let (globals, boxes) = state.get(&world).expect("the queries' world");
+        let fast = node_bounds(&tree, &globals, &boxes);
+        for k in 0..tree.len() {
+            assert_eq!(fast[k], node_bound_scan(k, &tree, &globals, &boxes), "node {k}");
+        }
+        assert!(fast[5].is_none(), "a node without a GlobalTransform has no bound");
+        assert!(fast[0].is_some_and(|b| b[3] > 0.0), "the root bounds its subtree's shapes");
     }
 }
