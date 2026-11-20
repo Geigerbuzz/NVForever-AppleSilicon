@@ -74,7 +74,9 @@ const HALF_PI: f32 = 1.57079633;
 // radius are ssao.rs's; ssao.rs `GTAO_SLICES`/`GTAO_STEPS` mirror the first two, a test
 // keeps them the same) [engineering choice: to be traded against the cost once measured].
 // Slice directions per pixel (each a line through the pixel, both sides marched).
-const SLICES: i32 = 2;
+// One since 2026-11-20: 2 cost 1.5 ms more GPU a frame at the native Strip (interleaved,
+// two rounds), the denoise smooths the extra noise; 2 steps instead of 4 saved nothing.
+const SLICES: i32 = 1;
 // Depth samples on each side of a slice.
 const STEPS: i32 = 4;
 // How far a sample's cosine to the view vector is pulled down before it may raise a

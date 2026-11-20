@@ -104,7 +104,7 @@ const LIGHTING_VARIANT: AoVariant = AoVariant { slices: None, steps: None, wide:
 /// `SLICES` and `STEPS` (ssao.wesl; a test keeps them the same), for the log line. Two by
 /// four at half resolution, about the old pass's twelve samples in cost [engineering choice:
 /// to be traded once measured].
-const GTAO_SLICES: u32 = 2;
+const GTAO_SLICES: u32 = 1;
 const GTAO_STEPS: u32 = 4;
 /// Largest radius on the screen, in pixels (near things, e.g. the player's arms).
 const MAX_SCREEN_RADIUS: f32 = 80.0;
@@ -269,7 +269,7 @@ const VARIANT_NEAREST: u32 = 16;
 
 impl AoVariant {
     /// The names the aid takes, in the order [`AoVariant::name`] writes them.
-    const NAMES: [&'static str; 8] = ["slices3", "slices4", "steps8", "wide", "wide6", "soft", "thin", "nearest"];
+    const NAMES: [&'static str; 10] = ["slices1", "slices3", "slices4", "steps2", "steps8", "wide", "wide6", "soft", "thin", "nearest"];
 
     /// The aid's value: `Err` with the value for a name it does not know, a name given twice
     /// or two that exclude each other (`slices3` and `slices4`, `wide` and `wide6`).
@@ -282,8 +282,8 @@ impl AoVariant {
         let mut out = AoVariant::default();
         for name in lower.split('+').map(str::trim) {
             let taken = match name {
-                "slices3" | "slices4" => out.slices.replace(if name == "slices3" { 3 } else { 4 }).is_some(),
-                "steps8" => out.steps.replace(8).is_some(),
+                "slices1" | "slices3" | "slices4" => out.slices.replace(name[6..].parse().unwrap()).is_some(),
+                "steps2" | "steps8" => out.steps.replace(name[5..].parse().unwrap()).is_some(),
                 "wide" | "wide6" => out.wide.replace(if name == "wide" { 8 } else { 6 }).is_some(),
                 "soft" => std::mem::replace(&mut out.soft, true),
                 "thin" => std::mem::replace(&mut out.thin, true),
@@ -333,7 +333,7 @@ impl AoVariant {
 
     /// The names set, joined by `+` in the order of [`AoVariant::NAMES`].
     fn name(self) -> String {
-        let set = [self.slices == Some(3), self.slices == Some(4), self.steps.is_some(), self.wide == Some(8), self.wide == Some(6), self.soft, self.thin, self.nearest];
+        let set = [self.slices == Some(1), self.slices == Some(3), self.slices == Some(4), self.steps == Some(2), self.steps == Some(8), self.wide == Some(8), self.wide == Some(6), self.soft, self.thin, self.nearest];
         AoVariant::NAMES.iter().zip(set).filter(|(_, on)| *on).map(|(n, _)| *n).collect::<Vec<_>>().join("+")
     }
 }
@@ -1317,7 +1317,7 @@ mod tests {
             with("slices4+wide").describe(false),
             "ambient occlusion: ground-truth estimate (GTAO), 4 slices x 4 steps a side at half resolution, depth-aware denoise, variant slices4+wide (NVF_PLAY_DEBUG_AO_VARIANT), on the picture (NVF_PLAY_DEBUG_AO=post)"
         );
-        assert!(with("steps8").describe(false).contains("2 slices x 8 steps a side"));
+        assert!(with("steps8").describe(false).contains("1 slices x 8 steps a side"));
         let strong = AoDebug { gtao_strength: Some(0.6), ..with("soft") };
         assert!(strong.describe(false).ends_with("denoise, variant soft (NVF_PLAY_DEBUG_AO_VARIANT), strength 0.6 (NVF_PLAY_DEBUG_AO_STRENGTH), on the picture (NVF_PLAY_DEBUG_AO=post)"));
         assert_eq!(
@@ -1643,11 +1643,11 @@ mod tests {
     /// The log line says what runs. The default, in the lighting: the remedies, the strength,
     /// the lamps and the exponent built in. On the picture the line is stage one's with the
     /// placement named; the old estimate's and the grey view's as before. The smoke scenarios
-    /// match the common start, "ambient occlusion: ground-truth estimate (GTAO), 2 slices x 4
+    /// match the common start, "ambient occlusion: ground-truth estimate (GTAO), 1 slices x 4
     /// steps a side at half resolution, depth-aware denoise".
     #[test]
     fn the_log_line_names_the_estimate_and_the_placement() {
-        let start = "ambient occlusion: ground-truth estimate (GTAO), 2 slices x 4 steps a side at half resolution, depth-aware denoise";
+        let start = "ambient occlusion: ground-truth estimate (GTAO), 1 slices x 4 steps a side at half resolution, depth-aware denoise";
         assert_eq!(AoDebug::default().describe(true), format!("{start}, variant soft+thin, strength 0.8, in the lighting: on the ambient light and on lamps without a shadow by 1, exponent 1"));
         let post = AoDebug { post: true, ..AoDebug::default() };
         assert_eq!(post.describe(false), format!("{start}, on the picture (NVF_PLAY_DEBUG_AO=post)"));
