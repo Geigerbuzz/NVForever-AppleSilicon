@@ -23,6 +23,7 @@ macro_rules! eprintln {
     };
 }
 
+mod thread_qos;
 mod activators;
 mod fos_start;
 mod reports;
@@ -1046,6 +1047,11 @@ fn task_pools(placed: Option<usize>) -> TaskPoolPlugin {
     if let Some(n) = placed {
         task_pool_options.max_total_threads = n;
     }
+    // macOS: the compute and async-compute workers at the user-interactive QoS class
+    // (thread_qos.rs), so the scheduler keeps them on the performance cores.
+    let raise: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(thread_qos::raise_this_thread);
+    task_pool_options.compute.on_thread_spawn = Some(raise.clone());
+    task_pool_options.async_compute.on_thread_spawn = Some(raise);
     if let Some(n) = std::env::var("NVF_PLAY_TEST_ASYNC_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
         task_pool_options.async_compute.min_threads = n;
         task_pool_options.async_compute.max_threads = n;
@@ -1766,6 +1772,7 @@ fn main() -> AppExit {
                 ..default()
             }),
     )
+    .add_plugins(thread_qos::ThreadQosPlugin)
     .add_plugins((window_icon::WindowIconPlugin, window_mode::WindowModePlugin))
     .add_plugins(nvf_play::audio_out::AudioOutPlugin)
     .add_plugins((ArchivePlugin(game), lights::LightsPlugin, fog::FogPlugin, haze::HazePlugin, eye_adapt::EyeAdaptPlugin, emittance::EmittancePlugin, water::WaterPlugin, tree::TreePlugin, terrain::TerrainPlugin, reflection::ReflectionPlugin, ripples::RipplesPlugin))
