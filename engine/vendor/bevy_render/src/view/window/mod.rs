@@ -262,7 +262,22 @@ impl SurfaceGuard<'_> {
     /// marked for [`create_surfaces`], which reconfigures it on the render thread before the next
     /// frame is prepared; the images until then are skipped.
     pub fn acquire(&self) -> Option<wgpu::SurfaceTexture> {
-        match timed_get_current_texture(self.surface) {
+        let got = timed_get_current_texture(self.surface);
+        // NVForever (2026-11-21): why an image was not given, said once per kind every ten
+        // seconds (the presenter counts the frames it could not show, not why).
+        let why = match &got {
+            wgpu::CurrentSurfaceTexture::Success(_) | wgpu::CurrentSurfaceTexture::Suboptimal(_) => None,
+            other => Some(format!("{other:?}")),
+        };
+        if let Some(why) = why {
+            static SAID: std::sync::Mutex<Option<(std::time::Instant, String)>> = std::sync::Mutex::new(None);
+            let mut said = SAID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if said.as_ref().is_none_or(|(at, w)| *w != why || at.elapsed().as_secs() >= 10) {
+                bevy_log::warn!("window: no image to present: {why}");
+                *said = Some((std::time::Instant::now(), why));
+            }
+        }
+        match got {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.outdated.store(true, core::sync::atomic::Ordering::Relaxed);

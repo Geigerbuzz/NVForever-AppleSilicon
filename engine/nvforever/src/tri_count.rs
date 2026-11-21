@@ -61,7 +61,7 @@ fn count(
     mut last: Local<f32>,
     meshes: Res<Assets<Mesh>>,
     mut counts: Local<Counts>,
-    q: Query<(Entity, &Mesh3d, &ViewVisibility, Has<LandMesh>, Has<RefVisual>)>,
+    q: Query<(Entity, &Mesh3d, &ViewVisibility, Has<LandMesh>, Has<RefVisual>, Has<bevy::mesh::skinning::SkinnedMesh>)>,
     parents: Query<&ChildOf>,
     names: Query<&Name>,
     mut label: Query<&mut Text, With<Label>>,
@@ -82,7 +82,8 @@ fn count(
     let mut top: Vec<(u64, Entity)> = Vec::new();
     let mut hidden = 0u64;
     let (mut drawn_v, mut hidden_v, mut hidden_n) = (0u64, 0u64, 0u32);
-    for (e, m, vis, is_land, is_ref) in &q {
+    let (mut skinned_t, mut skinned_v, mut skinned_n) = (0u64, 0u64, 0u32);
+    for (e, m, vis, is_land, is_ref, skinned) in &q {
         let Some(&(t, v)) = counts.0.get(&m.0.id()) else { continue };
         if !vis.get() {
             hidden += t;
@@ -91,6 +92,11 @@ fn count(
             continue;
         }
         drawn_v += v;
+        if skinned {
+            skinned_t += t;
+            skinned_v += v;
+            skinned_n += 1;
+        }
         let slot = if is_land { &mut land } else if is_ref { &mut refs } else { &mut other };
         slot.0 += t;
         slot.1 += 1;
@@ -111,7 +117,7 @@ fn count(
     };
     let total = land.0 + refs.0 + other.0;
     info!(
-        "triangles drawn: {total} in {} meshes (land {} in {}, placed {} in {}, other {} in {}); {hidden} more in culled meshes",
+        "triangles drawn: {total} in {} meshes, {drawn_v} vertices (land {} in {}, placed {} in {}, other {} in {}; skinned {skinned_t} triangles, {skinned_v} vertices in {skinned_n}); {hidden} more in culled meshes",
         land.1 + refs.1 + other.1, land.0, land.1, refs.0, refs.1, other.0, other.1
     );
     if let Ok(mut text) = label.single_mut() {
