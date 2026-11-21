@@ -370,11 +370,17 @@ impl crate::Surface for super::Surface {
             }
         }
 
-        let (drawable, texture) = match autoreleasepool(|_| {
+        // NVForever: the wait for a free drawable (gpu_busy.rs, NVF_METAL_GPU_TIME).
+        let asked = super::gpu_busy::enabled().then(std::time::Instant::now);
+        let got = autoreleasepool(|_| {
             render_layer
                 .nextDrawable()
                 .map(|drawable| (drawable.to_owned(), drawable.texture().to_owned()))
-        }) {
+        });
+        if let Some(asked) = asked {
+            super::gpu_busy::drawable_wait(asked.elapsed());
+        }
+        let (drawable, texture) = match got {
             Some(pair) => pair,
             None => return Err(crate::SurfaceError::Timeout),
         };

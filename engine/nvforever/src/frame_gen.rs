@@ -509,7 +509,7 @@ fn extract(
     // While it is on, the windows' images are the presenter's ([`hand_to_presenter`]); when it
     // goes off, or a presenter failed, the presenters finish what they were handed and end
     // before Bevy takes the windows' images again.
-    let defer = request.on && *PRESENTER && !presenters.failed;
+    let defer = (request.on || *LATE_PRESENT) && *PRESENTER && !presenters.failed;
     if !defer && !presenters.running.is_empty() {
         presenters.running.clear();
     }
@@ -524,6 +524,13 @@ fn extract(
         }
     }
 }
+
+/// `NVF_LATE_PRESENT=1` (2026-11-20): the presenter thread without frame generation. The frame is
+/// drawn into a stand-in and submitted at once; the presenter takes the window's image, copies
+/// the frame in and presents. Measured in the empty room before it: the render thread waited
+/// 6.6 ms a frame in `nextDrawable` (the previous frame's image not yet free) while the GPU sat
+/// idle 35% of the time, whatever the drawable count (HANDOFF 2026-11-20 late).
+static LATE_PRESENT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NVF_LATE_PRESENT").is_ok_and(|v| v.trim() == "1"));
 
 /// `NVF_FG_PRESENTER=0`: present from the render thread as before 2026-11-08, for comparisons.
 static PRESENTER: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| !std::env::var("NVF_FG_PRESENTER").is_ok_and(|v| v.trim() == "0"));
@@ -894,7 +901,12 @@ fn hand_to_presenter(
     latency: (Option<Res<crate::anti_lag::Presenting>>, Option<Res<crate::nv_low_latency::NvLowLatency>>),
     windows: Query<(Entity, MainEntity, &DeferredSwapchain, &SurfaceData)>,
 ) {
-    let refresh = request.refresh_millihertz.filter(|m| *m > 0).map_or(std::time::Duration::ZERO, |m| std::time::Duration::from_secs_f64(1000.0 / f64::from(m)));
+    // Without frame generation (`NVF_LATE_PRESENT`) nothing is paced: each frame goes when it is ready.
+    let refresh = if request.on {
+        request.refresh_millihertz.filter(|m| *m > 0).map_or(std::time::Duration::ZERO, |m| std::time::Duration::from_secs_f64(1000.0 / f64::from(m)))
+    } else {
+        std::time::Duration::ZERO
+    };
     // NVIDIA low latency: the presenter's presents of this frame name it (nv_low_latency.rs).
     let out_of_band = latency.0.and_then(|presenting| crate::nv_low_latency::OutOfBandPresents::of(&presenting, latency.1.as_deref()));
     // Those of windows without a stand-in this frame are dropped with it.
@@ -908,6 +920,10 @@ fn hand_to_presenter(
             frames.push(generated_frames.swap_remove(at).1.create_view(&default()));
         }
         frames.push((**stand_in).clone());
+        if !request.on {
+            // Late presenting: counted here for `log_stats` (frame generation counts its own).
+            stats.real.fetch_add(1, Ordering::Relaxed);
+        }
         let paired = frames.len() == 2;
         let at = match presenters.running.iter().position(|(e, _)| *e == entity) {
             Some(at) => at,

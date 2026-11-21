@@ -11,6 +11,7 @@
 //! (a 26 ms and a 33 ms GPU frame both show as 33.3 ms), so savings inside a step were
 //! invisible. Off (no handler, no lock) unless the variable is set.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -26,6 +27,15 @@ struct Window {
 
 static INTERVAL: OnceLock<Option<f64>> = OnceLock::new();
 static STATE: Mutex<Option<Window>> = Mutex::new(None);
+/// Time spent in `nextDrawable` (surface.rs) since the last log line, and how many calls.
+static DRAWABLE_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static DRAWABLE_WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// Adds one `nextDrawable` call's wait.
+pub(super) fn drawable_wait(d: core::time::Duration) {
+    DRAWABLE_WAIT_NANOS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+    DRAWABLE_WAITS.fetch_add(1, Ordering::Relaxed);
+}
 
 fn interval() -> Option<f64> {
     *INTERVAL.get_or_init(|| {
@@ -74,12 +84,16 @@ fn record(start: f64, end: f64) {
     let wall = w.started.elapsed().as_secs_f64();
     if wall >= every && w.frames > 0 {
         // stderr, not `log`: Bevy's default filter keeps only wgpu's errors.
+        let waits = DRAWABLE_WAITS.swap(0, Ordering::Relaxed).max(1);
+        let wait_ms = DRAWABLE_WAIT_NANOS.swap(0, Ordering::Relaxed) as f64 / 1e6;
         eprintln!(
-            "metal gpu busy: {:.1}% of the wall clock, {:.0} ms a second ({} presenting submits in {:.1} s)",
+            "metal gpu busy: {:.1}% of the wall clock, {:.0} ms a second ({} presenting submits in {:.1} s); nextDrawable wait {:.2} ms a call ({} calls)",
             100.0 * w.busy / wall,
             1000.0 * w.busy / wall,
             w.frames,
-            wall
+            wall,
+            wait_ms / waits as f64,
+            waits
         );
         let last_end = w.last_end;
         *w = Window { started: Instant::now(), last_end, busy: 0.0, frames: 0 };

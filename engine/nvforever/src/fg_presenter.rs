@@ -217,7 +217,18 @@ impl Drop for Presenter {
     fn drop(&mut self) {
         self.jobs.take();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            // At most 250 ms: with the window gone the thread can be inside `nextDrawable`,
+            // which never times out (wgpu-hal sets `allowsNextDrawableTimeout` false); joined
+            // without a limit, the game hung at exit [observed 2026-11-20, NVF_LATE_PRESENT=1:
+            // the process stayed up for hours after its last log line]. Left running then; the
+            // process ends around it.
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while !thread.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
         }
     }
 }
