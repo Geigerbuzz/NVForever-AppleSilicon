@@ -105,6 +105,7 @@ mod jip_provenance;
 #[cfg(test)]
 mod handler_diagnostics_tests;
 pub mod nvse;
+pub(crate) mod nvse_dispatch;
 mod nvse_faction_modifiers;
 pub mod nvse_ttw;
 pub mod nvse_unlisted;
