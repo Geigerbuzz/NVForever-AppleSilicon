@@ -58,6 +58,49 @@ pub struct AnimFolders {
     /// Where the spread-out refresh ([`Game::anim_folders_tick`]) goes on next frame: an
     /// index into the actors list as it stands then.
     cursor: usize,
+    /// [`FolderIndex`] of `entries`, made when first needed after they change.
+    index: Option<FolderIndex>,
+}
+
+/// The entries by the forms they name, and those naming none (for every actor): an actor
+/// visits only the entries that can be for it, not all of them [observed 2026-11-21: 778
+/// entries, the Strip with 162 plugins, `anim_folders_tick` 0.55 ms a frame walking every
+/// entry for each actor checked].
+#[derive(Debug, Default)]
+struct FolderIndex {
+    by_form: HashMap<FormId, Vec<usize>>,
+    formless: Vec<usize>,
+    /// How many entries it was made from: one made from another list is made again.
+    len: usize,
+}
+
+impl FolderIndex {
+    fn new(entries: &[FolderEntry]) -> Self {
+        let mut index = FolderIndex { len: entries.len(), ..FolderIndex::default() };
+        for (i, e) in entries.iter().enumerate() {
+            if e.forms.is_empty() {
+                index.formless.push(i);
+            }
+            for f in &e.forms {
+                let list = index.by_form.entry(*f).or_default();
+                if list.last() != Some(&i) {
+                    list.push(i);
+                }
+            }
+        }
+        index
+    }
+
+    /// The entries that can be for an actor, base form and weapon, in file order.
+    fn candidates(&self, forms: [Option<FormId>; 3]) -> Vec<usize> {
+        let mut out = self.formless.clone();
+        for f in forms.into_iter().flatten() {
+            out.extend(self.by_form.get(&f).into_iter().flatten().copied());
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
 }
 
 /// An entry's `form`: one hex ID or a list of them [observed: both, 254 lists].
@@ -236,13 +279,15 @@ impl Game<'_> {
         let actors = self.anim_folder_actors();
         let per_frame = actors.len().div_ceil(REFRESH_FRAMES as usize).max(1);
         let entries = std::mem::take(&mut self.anim_folders.entries);
+        let index = self.anim_folders.index.take().filter(|i| i.len == entries.len()).unwrap_or_else(|| FolderIndex::new(&entries));
         let start = self.anim_folders.cursor % actors.len();
         for k in 0..per_frame.min(actors.len()) {
             let a = actors[(start + k) % actors.len()];
-            self.refresh_actor_folders(&entries, a);
+            self.refresh_actor_folders(&entries, &index, a);
         }
         self.anim_folders.cursor = (start + per_frame) % actors.len();
         self.anim_folders.entries = entries;
+        self.anim_folders.index = Some(index);
         // Actors no longer drawn keep no stale entries.
         let live: HashSet<FormId> = actors.into_iter().collect();
         self.anim_folders.active.retain(|(a, _), _| live.contains(a));
@@ -262,6 +307,7 @@ impl Game<'_> {
         if !self.anim_folders.loaded && crate::mod_files::data_dir().is_some() {
             self.anim_folders.loaded = true;
             self.anim_folders.entries = load(self);
+            self.anim_folders.index = None;
         }
     }
 
@@ -269,39 +315,64 @@ impl Game<'_> {
     pub fn refresh_anim_folders(&mut self) {
         let actors = self.anim_folder_actors();
         let entries = std::mem::take(&mut self.anim_folders.entries);
+        let index = self.anim_folders.index.take().filter(|i| i.len == entries.len()).unwrap_or_else(|| FolderIndex::new(&entries));
         self.anim_folders.active.clear();
         for a in actors {
-            self.refresh_actor_folders(&entries, a);
+            self.refresh_actor_folders(&entries, &index, a);
         }
         self.anim_folders.entries = entries;
+        self.anim_folders.index = Some(index);
     }
 
     /// One actor's entries that hold now, put in `active` (or taken out when none hold).
-    fn refresh_actor_folders(&mut self, entries: &[FolderEntry], a: FormId) {
+    fn refresh_actor_folders(&mut self, entries: &[FolderEntry], index: &FolderIndex, a: FormId) {
         let base = crate::functions::base_of(self, a);
         let weapon = crate::functions::items::equipped_weapon(self, a);
+        // Only the player is seen in first person (player_body.rs reads the player's
+        // first-person files; anim_paths.rs every actor's third-person ones), so another
+        // actor skips the entries with first-person files only and keeps no first-person
+        // list: on the Strip with 162 plugins 47 of 120 entries were first-person only
+        // (FPS Weapon Lowering's 42, conditions on `Player.`), tested for each of ~230
+        // actors [observed 2026-11-21: conditions 0.53 ms of `anim_folders_tick`'s 0.6].
+        let npc = a != FormId::PLAYER_REF;
         let mut hold: Vec<&FolderEntry> = Vec::new();
-        for e in entries {
-            if !e.forms.is_empty() && !e.forms.iter().any(|&f| f == a || Some(f) == base || Some(f) == weapon) {
+        // Each distinct condition text is tested once for this actor: entries share them.
+        let mut tested: HashMap<&str, bool> = HashMap::new();
+        for i in index.candidates([Some(a), base, weapon]) {
+            let e = &entries[i];
+            if npc && e.third.is_empty() {
                 continue;
             }
             if let Some(c) = &e.condition {
-                match self.evaluate_on(c, Some(a)) {
-                    Ok(true) => {}
-                    Ok(false) => continue,
-                    Err(err) => {
-                        if self.anim_folders.warned.insert(c.clone()) {
-                            tracing::warn!("AnimGroupOverride: {}: condition {c:?}: {err}", e.folder);
-                        }
-                        continue;
+                let pass = match tested.get(c.as_str()) {
+                    Some(&pass) => pass,
+                    None => {
+                        let pass = match self.evaluate_on(c, Some(a)) {
+                            Ok(pass) => pass,
+                            Err(err) => {
+                                if self.anim_folders.warned.insert(c.clone()) {
+                                    tracing::warn!("AnimGroupOverride: {}: condition {c:?}: {err}", e.folder);
+                                }
+                                false
+                            }
+                        };
+                        tested.insert(c.as_str(), pass);
+                        pass
                     }
+                };
+                if !pass {
+                    continue;
                 }
             }
             hold.push(e);
         }
         hold.sort_by_key(|e| (e.priority, e.order));
         for first in [false, true] {
-            let files: Vec<String> = hold.iter().flat_map(|e| if first { e.first.iter() } else { e.third.iter() }).cloned().collect();
+            let files: Vec<String> = if first && npc {
+                Vec::new()
+            } else {
+                hold.iter().flat_map(|e| if first { e.first.iter() } else { e.third.iter() }).cloned().collect()
+            };
             if files.is_empty() {
                 self.anim_folders.active.remove(&(a, first));
             } else {
@@ -319,5 +390,6 @@ impl Game<'_> {
                 e.forms.push(to);
             }
         }
+        self.anim_folders.index = None;
     }
 }

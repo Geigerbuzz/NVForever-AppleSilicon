@@ -256,8 +256,15 @@ impl Game<'_> {
         let placed = self.world.placed;
         let is_actor = |r: &FormId| placed.get(*r).is_some_and(|p| matches!(&p.sig, b"ACHR" | b"ACRE"));
         let mut actors: std::collections::BTreeSet<FormId> = std::collections::BTreeSet::new();
-        for c in &self.loaded_cells {
-            actors.extend(placed.by_cell.get(c).into_iter().flatten().filter(|r| is_actor(r)));
+        // Each loaded cell's placed actors, from the per-cell cache: scanning every placed
+        // reference of the loaded cells and looking each up was 0.49 ms of every frame on
+        // the Strip with 162 plugins [observed 2026-11-21, NVF_SCRIPT_TIMING sub-phases].
+        {
+            let mut cache = self.cell_actors.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for c in &self.loaded_cells {
+                let list = cache.entry(*c).or_insert_with(|| placed.by_cell.get(c).into_iter().flatten().copied().filter(|r| is_actor(r)).collect());
+                actors.extend(list.iter().copied());
+            }
         }
         actors.extend(self.moved.iter().filter(|r| is_actor(r)));
         actors.extend(self.created_actors());

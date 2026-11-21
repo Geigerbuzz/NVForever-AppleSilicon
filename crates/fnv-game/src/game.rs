@@ -1933,6 +1933,10 @@ pub struct Game<'a> {
     /// Bringing an actor's abilities and worn enchantments up to date
     /// (`crate::abilities`): not again inside. Not saved.
     pub(crate) syncing_effects: bool,
+    /// The actors (ACHR, ACRE) placed in each cell by the load order, by cell, made the
+    /// first time a cell is asked about (`abilities::effects_actors`). The placed records
+    /// do not change while the game runs. Not saved.
+    pub(crate) cell_actors: std::sync::Mutex<std::collections::HashMap<FormId, std::sync::Arc<[FormId]>>>,
     /// When the abilities' and worn enchantments' conditions are checked next. Not saved.
     pub(crate) condition_check_due: f64,
     /// Image space modifiers on the screen, in the order they were applied
@@ -2715,6 +2719,7 @@ impl<'a> Game<'a> {
             effects: Vec::new(),
             next_effect: 1,
             syncing_effects: false,
+            cell_actors: Default::default(),
             condition_check_due: 0.0,
             image_modifiers: Vec::new(),
             effect_elapsed: 0.0,

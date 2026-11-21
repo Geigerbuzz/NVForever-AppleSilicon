@@ -2044,7 +2044,7 @@ fn log_script_timing(rt: &Runtime) {
     let ms = |s: f64| 1000.0 * s / frames;
     let mut phases: Vec<_> = t.phases.iter().collect();
     phases.sort_by(|a, b| b.1.total_cmp(a.1));
-    let phase_line: Vec<String> = phases.iter().take(14).map(|(n, s)| format!("{n} {:.3}", ms(**s))).collect();
+    let phase_line: Vec<String> = phases.iter().take(30).map(|(n, s)| format!("{n} {:.3}", ms(**s))).collect();
     info!("script timing: {frames:.0} ticks; per tick ms: {}", phase_line.join(", "));
     let mut kinds: Vec<_> = t.kinds.iter().collect();
     kinds.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
