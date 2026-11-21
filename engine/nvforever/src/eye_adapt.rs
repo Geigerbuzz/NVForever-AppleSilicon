@@ -281,6 +281,12 @@ fn mask_pass(
     device: Res<RenderDevice>,
     mut ctx: RenderContext,
 ) {
+    // Measuring aid (2026-11-21): `NVF_EYE_MASK=0` skips the mask (the meter then weighs
+    // every pixel the same), to see what the pass costs.
+    static OFF: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NVF_EYE_MASK").is_ok_and(|v| v.trim() == "0"));
+    if *OFF {
+        return;
+    }
     let (exposure, prepass, extracted) = view.into_inner();
     let Some(multi) = crate::ssao::depth_multisampled(prepass) else { return };
     let Some(depth) = prepass.depth_only_view() else { return };

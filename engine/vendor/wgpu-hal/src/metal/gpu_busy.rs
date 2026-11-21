@@ -56,6 +56,23 @@ pub(super) fn watch(raw: &ProtocolObject<dyn MTLCommandBuffer>) {
         if end > start && start > 0.0 {
             record(start, end);
         }
+        // NVForever (2026-11-21): a failed command buffer says why in Metal's own words
+        // (timeout, page fault, out of memory…); wgpu reports only "device lost: Unknown".
+        // MTLCommandBufferStatusError is 5.
+        let status: isize = unsafe { objc2::msg_send![cb, status] };
+        if status == 5 {
+            let error: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![cb, error] };
+            if !error.is_null() {
+                let code: isize = unsafe { objc2::msg_send![error, code] };
+                let text: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![error, description] };
+                let utf8: *const core::ffi::c_char = if text.is_null() { core::ptr::null() } else { unsafe { objc2::msg_send![text, UTF8String] } };
+                let words = if utf8.is_null() { std::string::String::new() } else { unsafe { core::ffi::CStr::from_ptr(utf8) }.to_string_lossy().into_owned() };
+                let label: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![cb, label] };
+                let l8: *const core::ffi::c_char = if label.is_null() { core::ptr::null() } else { unsafe { objc2::msg_send![label, UTF8String] } };
+                let label = if l8.is_null() { std::string::String::new() } else { unsafe { core::ffi::CStr::from_ptr(l8) }.to_string_lossy().into_owned() };
+                eprintln!("metal command buffer failed: code {code} ({label}): {words}");
+            }
+        }
     });
     unsafe { raw.addCompletedHandler(block2::RcBlock::as_ptr(&block)) };
 }
