@@ -530,7 +530,17 @@ fn extract(
 /// the frame in and presents. Measured in the empty room before it: the render thread waited
 /// 6.6 ms a frame in `nextDrawable` (the previous frame's image not yet free) while the GPU sat
 /// idle 35% of the time, whatever the drawable count (HANDOFF 2026-11-20 late).
-static LATE_PRESENT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NVF_LATE_PRESENT").is_ok_and(|v| v.trim() == "1"));
+///
+/// On by default on macOS since 2026-11-21 (room 90 → 104 fps, Strip 47 → 56 fps);
+/// `NVF_LATE_PRESENT=0` presents from the render thread again, `=1` turns it on elsewhere.
+static LATE_PRESENT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| match std::env::var("NVF_LATE_PRESENT") {
+    Ok(v) => v.trim() == "1",
+    Err(_) => cfg!(target_os = "macos"),
+});
+
+/// `NVF_LATE_PRESENT_DEPTH=<n>`: frames that may wait for the presenter while presenting late
+/// (1, the default, or 2): each is a frame of delay.
+static LATE_PRESENT_DEPTH: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| std::env::var("NVF_LATE_PRESENT_DEPTH").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(1));
 
 /// `NVF_FG_PRESENTER=0`: present from the render thread as before 2026-11-08, for comparisons.
 static PRESENTER: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| !std::env::var("NVF_FG_PRESENTER").is_ok_and(|v| v.trim() == "0"));
@@ -940,6 +950,7 @@ fn hand_to_presenter(
         };
         use crate::fg_presenter::Handed;
         let presenter = &mut presenters.running[at].1;
+        presenter.set_ahead(if request.on { STAND_INS as u64 - 1 } else { *LATE_PRESENT_DEPTH });
         match if presenter.running() { presenter.send(frames, refresh, out_of_band.clone()) } else { Handed::Ended } {
             Handed::Over => {}
             // Not shown: the presenter still has the frames before it to copy.

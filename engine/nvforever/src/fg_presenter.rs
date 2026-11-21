@@ -69,6 +69,11 @@ pub(crate) struct Presenter {
     sent: u64,
     /// A frame was left out because the presenter was behind (said once).
     said_behind: bool,
+    /// How many frames handed over may wait for their copy: [`STAND_INS`] - 1 for frame
+    /// generation; fewer for late presenting (frame_gen.rs `NVF_LATE_PRESENT_DEPTH`), where
+    /// each waiting frame is a frame of delay [observed 2026-11-21: with two, frames went out
+    /// 19 ms after hand-over in the empty room and 30 ms on the Strip].
+    ahead: u64,
 }
 
 /// What became of a frame given to [`Presenter::send`].
@@ -156,7 +161,12 @@ impl Presenter {
             .name("nvf-frame-gen-present".into())
             .spawn(move || run(&received, &surface, &device, &queue, &thread_shared))?;
         bevy::log::info!("frame generation: presenting on a thread of its own, paced half a real frame apart");
-        Ok(Self { jobs: Some(jobs), thread: Some(thread), shared, sent: 0, said_behind: false })
+        Ok(Self { jobs: Some(jobs), thread: Some(thread), shared, sent: 0, said_behind: false, ahead: STAND_INS as u64 - 1 })
+    }
+
+    /// Sets how many frames may wait for their copy (1 to [`STAND_INS`] - 1).
+    pub(crate) fn set_ahead(&mut self, ahead: u64) {
+        self.ahead = ahead.clamp(1, STAND_INS as u64 - 1);
     }
 
     pub(crate) fn shared(&self) -> &Shared {
@@ -181,7 +191,7 @@ impl Presenter {
     pub(crate) fn send(&mut self, frames: Vec<wgpu::TextureView>, refresh: Duration, out_of_band: Option<crate::nv_low_latency::OutOfBandPresents>) -> Handed {
         let Some(jobs) = &self.jobs else { return Handed::Ended };
         let index = self.sent + 1;
-        let needed = index.saturating_sub(STAND_INS as u64 - 1);
+        let needed = index.saturating_sub(self.ahead);
         let started = Instant::now();
         let deadline = started + Duration::from_millis(250);
         let mut copied = self.shared.copied.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -458,7 +468,7 @@ mod tests {
             // Unwinds as a panic does, without the panic hook's message.
             std::panic::resume_unwind(Box::new("the presenter's panic"));
         });
-        let mut presenter = Presenter { jobs: Some(jobs), thread: Some(thread), shared: Arc::new(Shared::new(Default::default(), Default::default())), sent: 0, said_behind: false };
+        let mut presenter = Presenter { jobs: Some(jobs), thread: Some(thread), shared: Arc::new(Shared::new(Default::default(), Default::default())), sent: 0, said_behind: false, ahead: STAND_INS as u64 - 1 };
         assert!(presenter.running());
         assert_eq!(presenter.send(Vec::new(), Duration::ZERO, None), Handed::Over, "handed over while the thread runs");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -485,7 +495,7 @@ mod tests {
             let _ = stopped.recv();
             drop(received);
         });
-        let mut presenter = Presenter { jobs: Some(jobs), thread: Some(thread), shared: Arc::new(Shared::new(Default::default(), Default::default())), sent: 0, said_behind: false };
+        let mut presenter = Presenter { jobs: Some(jobs), thread: Some(thread), shared: Arc::new(Shared::new(Default::default(), Default::default())), sent: 0, said_behind: false, ahead: STAND_INS as u64 - 1 };
         // The first frames fit the stand-ins.
         for _ in 0..STAND_INS - 1 {
             assert_eq!(presenter.send(Vec::new(), Duration::ZERO, None), Handed::Over);
