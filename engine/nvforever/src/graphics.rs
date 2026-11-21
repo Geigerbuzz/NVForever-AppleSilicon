@@ -182,6 +182,7 @@ pub struct Graphics {
     pub dlss_model: DlssModel,
     pub light_shafts: bool,
     pub water_reflections: bool,
+    pub water_effects: bool,
     /// Water mirrors the world through the reflection camera (`reflection.rs`; on in
     /// vanilla, as the original's water reflects the world). Off, water reflects the sky,
     /// and what is on the screen where `water_reflections` is on.
@@ -212,7 +213,7 @@ pub struct Graphics {
 
 /// The keys of `--graphics-only`: the settings page's switches and the anti-aliasing and
 /// shadow-filter choices that are not vanilla's, in the order of [`Graphics::describe`].
-pub const KEYS: [&str; 19] = [
+pub const KEYS: [&str; 20] = [
     "ambient-occlusion",
     "fine-shadows",
     "bloom",
@@ -223,6 +224,7 @@ pub const KEYS: [&str; 19] = [
     "taa",
     "light-shafts",
     "water-reflections",
+    "water-effects",
     "mesh-terrain-blend",
     "shadow-filter-hardware",
     "shadow-filter-temporal",
@@ -268,6 +270,7 @@ impl Graphics {
             dlss_model: DlssModel::Default,
             light_shafts: on,
             water_reflections: on,
+            water_effects: on,
             water_mirror: true,
             shadow_filter: ShadowFilteringMethod::Gaussian,
             // Off in both looks, so `enhanced` (quality.rs `enhanced_keys`) leaves it out.
@@ -304,6 +307,7 @@ impl Graphics {
             "anisotropic" => &mut self.anisotropic,
             "light-shafts" => &mut self.light_shafts,
             "water-reflections" => &mut self.water_reflections,
+            "water-effects" => &mut self.water_effects,
             "mesh-terrain-blend" => &mut self.mesh_terrain_blend,
             "terrain-height-blend" => &mut self.terrain_height_blend,
             "terrain-anti-tiling" => &mut self.terrain_anti_tiling,
@@ -355,6 +359,7 @@ impl Graphics {
             (self.screen_aa == ScreenAa::Taa, "temporal anti-aliasing"),
             (self.light_shafts, "sun shafts"),
             (self.water_reflections, "screen-space water reflections"),
+            (self.water_effects, "water caustics and river flow"),
             (!self.water_mirror, "no mirrored water"),
             (self.mesh_terrain_blend, "meshes blended into the ground"),
             (self.shadow_filter == ShadowFilteringMethod::Hardware2x2, "hardware 2x2 shadow filtering"),
@@ -1473,7 +1478,7 @@ mod tests {
         assert_eq!(all.describe().split(", ").count(), KEYS.len() + 1 - 3);
         assert_eq!((all.screen_aa, all.shadow_filter), (ScreenAa::Taa, ShadowFilteringMethod::Temporal));
         let enhanced = Graphics::preset(Preset::Enhanced);
-        assert!(enhanced.screen_aa == ScreenAa::Off && enhanced.light_shafts && enhanced.water_reflections);
+        assert!(enhanced.screen_aa == ScreenAa::Off && enhanced.light_shafts && enhanced.water_reflections && enhanced.water_effects);
         assert_eq!(enhanced.shadow_filter, ShadowFilteringMethod::Gaussian);
         assert!(Graphics::only(&["nonsense".into()]).is_err());
         let cycle = FrameTimes::parse_cycle("vanilla; taa,light-shafts ;enhanced;vanilla,no-sun-shadows;shadow-distance=8000,cascades=3").expect("cycle");

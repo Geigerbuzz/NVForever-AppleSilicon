@@ -1,6 +1,8 @@
 //! DDS → GPU textures. BC1/BC2/BC3 retain their mip chains; BC5 data and
 //! explicitly requested normal maps have separate interpretations (dds-bc5.md).
 
+mod filtering;
+
 use crate::data::GameData;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{
@@ -430,7 +432,14 @@ impl TextureCache {
             })
             .collect();
         self.ahead.retain(|_, (_, at)| now - *at < AHEAD_KEEP_SECS);
-        self.workers.entries.lock().expect("worker textures").retain(|_, w| w.stored_at.is_none_or(|t| now - t < WORKER_KEEP_SECS));
+        // A worker may lose the canonical-key race while its distinct handle is
+        // still sampled by a material. Keep that handle discoverable only while
+        // an external owner holds it; canonical copies retain their usual grace.
+        let canonical: std::collections::HashSet<_> = ids.values().copied().collect();
+        self.workers.entries.lock().expect("worker textures").retain(|_, w| {
+            w.stored_at.is_none_or(|t| now - t < WORKER_KEEP_SECS)
+                || (!canonical.contains(&w.handle.id()) && held_beyond(&w.handle, 1))
+        });
         let drop = idle.sweep_timed(now, entries, keep.secs, keep.max, |k| ids.get(k).and_then(|&id| hints.since(id)));
         for ((p, usage, clamp), _) in &drop {
             (if *clamp { &mut self.clamped } else { &mut self.map }).remove(&(p.clone(), *usage));
@@ -446,7 +455,8 @@ impl TextureCache {
         let mut n = 0;
         let mut entries = self.workers.entries.lock().expect("worker textures");
         for (key, w) in entries.iter_mut() {
-            let Some(image) = w.image.take() else { continue };
+            let Some(mut image) = w.image.take() else { continue };
+            filtering::publish(&mut image);
             if images.insert(w.handle.id(), image).is_ok() {
                 self.map.entry(key.clone()).or_insert_with(|| Some((w.handle.clone(), w.lacks_alpha)));
                 n += 1;
@@ -562,7 +572,8 @@ impl TextureCache {
         if !clamp {
             let mut entries = self.workers.entries.lock().expect("worker textures");
             if let Some(w) = entries.get_mut(&(path.clone(), usage)) {
-                if let Some(image) = w.image.take() {
+                if let Some(mut image) = w.image.take() {
+                    filtering::publish(&mut image);
                     let _ = images.insert(w.handle.id(), image);
                     w.stored_at = Some(0.0);
                 }
