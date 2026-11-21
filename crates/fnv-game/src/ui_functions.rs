@@ -189,19 +189,23 @@ fn inherited(ui: &fnv_ui::Ui, path: &str, exclude_root: bool) -> Option<f64> {
 /// The UI function `name` (any case) with its arguments; `None` when it is not one of
 /// these.
 pub fn call(g: &mut Game, name: &str, args: &[XVal]) -> Option<Result<XVal, String>> {
-    let lname = name.to_ascii_lowercase();
-    let path = text(args, 0);
+    // Names come in lower case (nvse::call's catalogue names): no copy then. Every extender
+    // call that passed this handler copied its name, and turned its first argument into
+    // text, before the name was matched [observed 2026-11-21, Time Profiler on the Strip].
+    let lname_cow: std::borrow::Cow<'_, str> = if name.bytes().any(|b| b.is_ascii_uppercase()) { name.to_ascii_lowercase().into() } else { name.into() };
+    let lname: &str = &lname_cow;
+    let path = std::cell::LazyCell::new(|| text(args, 0));
     // The path names the trait or tile read or changed, the tile injected into or
     // unloaded; AddTileFromTemplate's is before its first `|` [documented:
     // AddTileFromTemplate].
     let target = if lname == "addtilefromtemplate" { path.split('|').next().unwrap_or("") } else { path.as_str() };
-    if TREE_FUNCTIONS.contains(&lname.as_str()) && on_hud(target) {
+    if TREE_FUNCTIONS.contains(&lname) && on_hud(target) {
         // The HUD's writes kept back while nothing read the HUD, made now; the engine
         // writes them every frame from here on (`crate::ui_hud::defer`) [design].
         g.ui_used = true;
         crate::ui_hud::flush(g);
     }
-    Some(Ok(match lname.as_str() {
+    Some(Ok(match lname {
         // The extender's own four count `*:N` from the first child, JIP's from the last
         // (`fnv_ui::Count`) [observed: menu-xml.md §10.1; hud.md §14.8; documented: MCM
         // Guide v6, menu-xml.md §10.4].

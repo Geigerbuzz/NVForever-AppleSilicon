@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::extract::{self, all, first, global, has_flag, int, local_fid, num, text, Issues};
 use crate::form::FormId;
+use crate::idmap::IdMap;
 use crate::forms::ser_sig;
 
 /// Record flag 0x400 on references: "Persistent" [documented: GECK wiki GetReferenceFlag,
@@ -250,7 +251,8 @@ pub const REF_SIGS: &[&[u8; 4]] = &[b"REFR", b"ACHR", b"ACRE", b"PGRE"];
 
 #[derive(Default)]
 pub struct RefTable {
-    pub refs: BTreeMap<FormId, PlacedRef>,
+    /// Every placed reference, iterated in FormID order; `get` is O(1) ([`IdMap`]).
+    pub refs: IdMap<PlacedRef>,
     /// Lower-case Editor ID -> reference.
     pub edids: HashMap<String, FormId>,
     /// References by cell, in FormID order.
@@ -437,6 +439,7 @@ impl RefTable {
         self.cell_edids.get(&edid.to_ascii_lowercase()).copied()
     }
 
+    #[inline]
     pub fn get(&self, id: FormId) -> Option<&PlacedRef> {
         self.refs.get(&id)
     }

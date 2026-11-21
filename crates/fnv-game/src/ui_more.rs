@@ -597,37 +597,41 @@ fn inspection_tile(g: &Game, path: &str) -> Option<TileId> {
 
 /// The function `name` (any case) with its arguments; `None` when it is not one of these.
 pub fn call(g: &mut Game, name: &str, subject: Option<FormId>, args: &[XVal]) -> Option<Result<XVal, String>> {
-    let lname = name.to_ascii_lowercase();
+    // Names come in lower case (nvse::call's catalogue names): no copy then. Every extender
+    // call that passed this handler copied its name, and turned its first argument into
+    // text, before the name was matched [observed 2026-11-21, Time Profiler on the Strip].
+    let lname_cow: std::borrow::Cow<'_, str> = if name.bytes().any(|b| b.is_ascii_uppercase()) { name.to_ascii_lowercase().into() } else { name.into() };
+    let lname: &str = &lname_cow;
     let path_arg = if lname == "dumptileinfo" { 1 } else { 0 };
     // The HUD's kept-back writes are made first when the function touches the HUD (as
     // `crate::ui_functions` does): the HUD bars and the attachments always, a cached tile
     // (any menu's, the HUD's as a rule) [design], the path functions by their path; a
     // function on another menu leaves the HUD's writes kept back.
-    let cursor_query = matches!(lname.as_str(), "getuielementtype" | "dumptileinfo");
+    let cursor_query = matches!(lname, "getuielementtype" | "dumptileinfo");
     let inspected = cursor_query.then(|| inspection_tile(g, &text(args, path_arg))).flatten();
     let on_hud = inspected.is_some_and(|t| crate::ui_functions::on_hud(&g.ui_tree.path_of(t)))
         || lname.starts_with("hudbar")
         || lname.starts_with("cacheui")
-        || matches!(lname.as_str(), "attachuixml" | "attachuicomponent" | "dumptileinfoall")
-        || (!cursor_query && TREE_FUNCTIONS.contains(&lname.as_str()) && crate::ui_functions::on_hud(&text(args, path_arg)));
+        || matches!(lname, "attachuixml" | "attachuicomponent" | "dumptileinfoall")
+        || (!cursor_query && TREE_FUNCTIONS.contains(&lname) && crate::ui_functions::on_hud(&text(args, path_arg)));
     if on_hud {
         g.ui_used = true;
         crate::ui_hud::flush(g);
     }
-    if let Some(r) = crate::ui_cache::call(g, &lname, args) {
+    if let Some(r) = crate::ui_cache::call(g, lname, args) {
         return Some(r);
     }
-    if let Some(r) = crate::ui_hudbar::call(g, &lname, args) {
+    if let Some(r) = crate::ui_hudbar::call(g, lname, args) {
         return Some(r);
     }
-    let path = text(args, 0);
+    let path = std::cell::LazyCell::new(|| text(args, 0));
     let zero = XVal::Num(0.0);
     let gradient = |g: &Game, owner: Owner| {
         let (t, k) = g.ui_tree.find_trait(&path)?;
         let name = trait_name(&g.ui_tree, t, k);
         g.ui_gradients.active(owner, t, &name).cloned()
     };
-    Some(Ok(match lname.as_str() {
+    Some(Ok(match lname {
         // [documented: SetUIFloatGradual] `path [start [end [duration [mode]]]]`. No return
         // value is documented: 1 when the trait is there [design].
         "setuifloatgradual" => match g.ui_tree.find_trait(&path) {

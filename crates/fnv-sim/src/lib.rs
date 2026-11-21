@@ -5,7 +5,8 @@
 //! - [`form`]: global FormIDs
 //! - [`forms`]: base forms the simulation needs (items, containers, doors, actors,
 //!   leveled lists, globals), read through the Layer 1 schema
-//! - [`refs`]: placed references with their extra data
+//! - [`refs`]: placed references with their extra data; [`idmap`]: the FormID-ordered
+//!   map with O(1) lookups that holds them
 //! - [`furniture_facts`]: what the AI may ask about furniture and actor assets
 //! - [`settings`]: game settings (GMST); [`clock`]: game time in the time globals
 //! - [`inventory`], [`leveled`]: item stacks and leveled-list resolution
@@ -23,6 +24,7 @@ pub mod extract;
 pub mod form;
 pub mod forms;
 pub mod furniture_facts;
+pub mod idmap;
 pub mod inventory;
 pub mod leveled;
 pub mod refs;

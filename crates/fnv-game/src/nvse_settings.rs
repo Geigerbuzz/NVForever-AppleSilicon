@@ -73,18 +73,22 @@ impl Game<'_> {
 
 /// The functions of this file; `None` for any other name.
 pub(crate) fn call(g: &mut Game, name: &str, args: &[XVal]) -> Option<Result<XVal, String>> {
-    let texts = g.data.ini_texts.clone();
+    // Borrowed from the load order's data (not the game), so `g` stays free: cloned, every
+    // extender call that reached this handler copied the INI files' text [observed
+    // 2026-11-21, Time Profiler on the Strip].
+    let data = g.data;
+    let texts = &data.ini_texts;
     let v = match name {
         // A missing setting is -1 [observed: nvse-sixth, ini.missing; names ignore case,
         // ini.case].
         // (GetNumericINISetting and GetNumericIniSetting are one name in lower case.)
         "getnumericinisetting" => {
-            let v = key(args).and_then(|k| g.ini.values(&texts).get(&k).cloned());
+            let v = key(args).and_then(|k| g.ini.values(texts).get(&k).cloned());
             XVal::Num(v.and_then(|s| s.parse::<f64>().ok()).unwrap_or(-1.0))
         }
         // A missing string setting gives no value: the call fails [observed: nvse-sixth,
         // ini.string.missing "script call failed"].
-        "getstringinisetting" => match key(args).and_then(|k| g.ini.values(&texts).get(&k).cloned()) {
+        "getstringinisetting" => match key(args).and_then(|k| g.ini.values(texts).get(&k).cloned()) {
             Some(s) => XVal::Str(s),
             None => return Some(Err("GetStringIniSetting: no such INI setting".into())),
         },
@@ -96,7 +100,7 @@ pub(crate) fn call(g: &mut Game, name: &str, args: &[XVal]) -> Option<Result<XVa
                 _ => return Some(Ok(XVal::Num(0.0))),
             };
             let ok = match key(args) {
-                Some(k) => match g.ini.values(&texts).get_mut(&k) {
+                Some(k) => match g.ini.values(texts).get_mut(&k) {
                     Some(slot) => {
                         *slot = crate::nvse_settings::number_text(value);
                         true
@@ -111,7 +115,7 @@ pub(crate) fn call(g: &mut Game, name: &str, args: &[XVal]) -> Option<Result<XVa
         // ini.set.string]; a missing one is left alone [hypothesis].
         "setstringinisetting" => {
             if let (Some(k), Some(XVal::Str(new))) = (key(args), args.get(1)) {
-                if let Some(slot) = g.ini.values(&texts).get_mut(&k) {
+                if let Some(slot) = g.ini.values(texts).get_mut(&k) {
                     *slot = new.clone();
                 }
             }

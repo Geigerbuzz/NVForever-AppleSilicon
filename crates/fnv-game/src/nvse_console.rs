@@ -20,6 +20,13 @@ fn text(args: &[XVal], k: usize) -> Option<String> {
 
 /// The functions of this file; `None` for any other name.
 pub(crate) fn call(g: &mut Game, name: &str, subject: Option<FormId>, args: &[XVal]) -> Option<Result<XVal, String>> {
+    // Every name below is `console` or `con_…`: any other goes on down nvse::call's chain
+    // before the arguments are turned into words. Turned into words first, every extender
+    // call that passed here formatted its numbers as text [observed 2026-11-21, Time
+    // Profiler on the Strip: 13% of a kNVSE folder condition's time].
+    if name != "console" && !name.starts_with("con_") {
+        return None;
+    }
     let ctx = ConsoleCtx { on: subject, active_quest: g.ui.active_quest };
     let words: Vec<String> = (0..args.len()).filter_map(|k| text(args, k)).collect();
     let run: Result<Vec<String>, String> = match name {
